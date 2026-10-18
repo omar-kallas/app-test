@@ -24,7 +24,16 @@ jobs:
       - name: Build release APK
         run: |
           chmod +x gradlew
-          ./gradlew --no-daemon assembleRelease
+          set -o pipefail
+          ./gradlew --no-daemon assembleRelease 2>&1 | tee build.log
+
+      - name: Report build errors
+        if: failure()
+        run: |
+          # Surface compiler errors as an annotation so they show on the run page.
+          msg=$(grep -E '^e: |What went wrong|^> |error:|Exception' build.log | head -100 \
+            | sed -e 's/%/%25/g' -e 's#file:///home/runner/work/[^/]*/[^/]*/##' | awk '{printf "%s%%0A", $0}')
+          echo "::error title=Build errors::${msg}"
 
       - name: Rename APK
         run: |
