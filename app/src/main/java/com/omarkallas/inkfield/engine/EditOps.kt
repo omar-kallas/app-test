@@ -48,7 +48,9 @@ object EditOps {
             val b = e.processed.bounds
             if (b.right < minX || b.left > maxX || b.bottom < minY || b.top > maxY) { out.add(s); continue }
             val pr = e.processed
-            val reach = r + (if (s.brush.isCenterline) s.size * 0.5f else 0f)
+            // Count the stroke's own half-width so touching its visible edge cuts it.
+            val avgHalf = if (pr.n > 0) pr.w.average().toFloat() else 0f
+            val reach = r + (if (s.brush.isCenterline) s.size * 0.5f else avgHalf * 0.8f)
             // Quick hit test on the visible geometry.
             var hit = false
             if (pr.n == 1) hit = Geometry.distToSegment(pr.x[0], pr.y[0], ax, ay, bx, by) <= reach + pr.w[0]
@@ -57,7 +59,6 @@ object EditOps {
                 if (Geometry.segSegDist(pr.x[i - 1], pr.y[i - 1], pr.x[i], pr.y[i], ax, ay, bx, by) <= reach + hw * 0.5f) { hit = true; break }
             }
             if (!hit) { out.add(s); continue }
-            changed = true
             // Densify processed points so the cut is clean even on straight, sparse strokes.
             val step = max(r / 3f, 0.5f)
             val dense = ArrayList<FloatArray>()
@@ -77,6 +78,9 @@ object EditOps {
                 }
                 dense.add(floatArrayOf(pr.x[i], pr.y[i], pr.p[i], pr.t[i]))
             }
+            // Only rewrite the stroke if the eraser actually removes part of it.
+            if (dense.none { q -> Geometry.distToSegment(q[0], q[1], ax, ay, bx, by) <= reach }) { out.add(s); continue }
+            changed = true
             var run = ArrayList<FloatArray>()
             fun flush() {
                 if (run.size >= 2) {
