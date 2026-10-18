@@ -56,9 +56,12 @@ private fun argbToHsv(c: Int): FloatArray = FloatArray(3).also { android.graphic
 
 private fun hex(c: Int) = "%06X".format(c and 0xFFFFFF)
 
-@OptIn(ExperimentalFoundationApi::class)
+@OptIn(ExperimentalFoundationApi::class, androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
 @Composable
-fun ColorPanel(ctl: EditorController, onClose: () -> Unit, onSwatches: () -> Unit, onEyedropper: () -> Unit) {
+fun ColorPanel(
+    ctl: EditorController, onClose: () -> Unit, onSwatches: () -> Unit, onEyedropper: () -> Unit,
+    onExportPalettes: () -> Unit = {}, onImportPalettes: () -> Unit = {},
+) {
     val start = remember { argbToHsv(ctl.color) }
     var h by remember { mutableFloatStateOf(start[0]) }
     var s by remember { mutableFloatStateOf(start[1]) }
@@ -180,7 +183,14 @@ fun ColorPanel(ctl: EditorController, onClose: () -> Unit, onSwatches: () -> Uni
                 GlyphButton(Glyph.CHECK, { push(true); onClose() }, size = 36.dp, contentDescription = "Done")
             }
             Spacer(Modifier.height(12.dp))
-            Text("Palette", color = Ink.muted, fontSize = 12.sp)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                GlyphButton(Glyph.UNDO, { ctl.selectPalette(ctl.activePalette - 1) }, size = 28.dp, enabled = ctl.palettes.size > 1, contentDescription = "Previous palette")
+                Text(
+                    ctl.palettes.getOrNull(ctl.activePalette)?.name ?: "Palette", color = Ink.text, fontSize = 13.sp,
+                    modifier = Modifier.weight(1f).padding(horizontal = 4.dp),
+                )
+                GlyphButton(Glyph.REDO, { ctl.selectPalette(ctl.activePalette + 1) }, size = 28.dp, enabled = ctl.palettes.size > 1, contentDescription = "Next palette")
+            }
             Spacer(Modifier.height(6.dp))
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                 ctl.palette.forEachIndexed { i, pc ->
@@ -198,6 +208,25 @@ fun ColorPanel(ctl: EditorController, onClose: () -> Unit, onSwatches: () -> Uni
                 }
             }
             Text("Hold a swatch to store the current color in it.", color = Ink.muted, fontSize = 11.sp, modifier = Modifier.padding(top = 6.dp))
+            Spacer(Modifier.height(10.dp))
+            Text("Harmonies of this color", color = Ink.muted, fontSize = 12.sp)
+            Spacer(Modifier.height(6.dp))
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                ctl.harmony(hsvToArgb(h, s, v)).forEach { hc ->
+                    Box(
+                        Modifier.size(28.dp).clip(CircleShape).background(Color(hc)).border(1.dp, Ink.outline, CircleShape)
+                            .combinedClickable(onClick = { setFromArgb(hc, true) }),
+                    )
+                }
+            }
+            Spacer(Modifier.height(10.dp))
+            androidx.compose.foundation.layout.FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Chip("New palette", false) { ctl.newPalette() }
+                if (ctl.palettes.size > 1) Chip("Delete", false) { ctl.deletePalette() }
+                Chip("Export", false) { onExportPalettes() }
+                Chip("Import", false) { onImportPalettes() }
+                Chip(if (ctl.paletteStrip) "Hide strip" else "Show strip", false) { ctl.togglePaletteStrip() }
+            }
         }
     }
 }
@@ -219,3 +248,59 @@ private fun RgbSlider(label: String, value: Int, tint: Color, onChange: (Int) ->
 
 @Suppress("unused")
 private fun Color.argb() = toArgb()
+
+
+/**
+ * Palette strip under the tool wheel. Tap a color to use it; swipe sideways with the arrows to change
+ * palettes; hold and drag along the strip to mix between neighboring colors.
+ */
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+fun PaletteStrip(ctl: EditorController, modifier: Modifier = Modifier) {
+    var mixing by remember { mutableStateOf<Int?>(null) }
+    val colors = ctl.palette
+    Panel(modifier) {
+        Row(Modifier.padding(horizontal = 4.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+            GlyphButton(Glyph.UNDO, { ctl.selectPalette(ctl.activePalette - 1) }, size = 26.dp, enabled = ctl.palettes.size > 1, contentDescription = "Previous palette")
+            Box {
+                Row(
+                    Modifier.pointerInput(colors) {
+                        androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress(
+                            onDragStart = { p -> mixing = mixAt(colors, p.x / size.width) },
+                            onDrag = { ch, _ -> ch.consume(); mixing = mixAt(colors, ch.position.x / size.width) },
+                            onDragEnd = { mixing?.let { ctl.setColor(it, applyToSelection = true) }; mixing = null },
+                            onDragCancel = { mixing = null },
+                        )
+                    },
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    colors.forEach { pc ->
+                        Box(
+                            Modifier.size(24.dp).clip(CircleShape).background(Color(pc))
+                                .border(if (pc == ctl.color) 2.dp else 1.dp, if (pc == ctl.color) Ink.text else Ink.outline, CircleShape)
+                                .combinedClickable(onClick = { ctl.setColor(pc, applyToSelection = true) }),
+                        )
+                    }
+                }
+                mixing?.let { mc ->
+                    // While mixing, the strip becomes one continuous gradient with the picked color on top.
+                    Canvas(Modifier.matchParentSize().clip(RoundedCornerShape(12.dp))) {
+                        drawRect(Brush.horizontalGradient(colors.map { Color(it) }))
+                        drawCircle(Color(mc), size.height * 0.75f, Offset(size.width / 2f, size.height / 2f))
+                        drawCircle(Color.White, size.height * 0.75f, Offset(size.width / 2f, size.height / 2f), style = Stroke(2.dp.toPx()))
+                    }
+                }
+            }
+            GlyphButton(Glyph.REDO, { ctl.selectPalette(ctl.activePalette + 1) }, size = 26.dp, enabled = ctl.palettes.size > 1, contentDescription = "Next palette")
+        }
+    }
+}
+
+/** Color at fraction [t] along the palette, blending neighbors linearly. */
+private fun mixAt(colors: List<Int>, t: Float): Int {
+    if (colors.isEmpty()) return 0xFF000000.toInt()
+    val x = t.coerceIn(0f, 1f) * (colors.size - 1)
+    val i = x.toInt().coerceIn(0, colors.size - 1)
+    val j = (i + 1).coerceAtMost(colors.size - 1)
+    return androidx.core.graphics.ColorUtils.blendARGB(colors[i], colors[j], x - i)
+}

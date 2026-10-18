@@ -18,22 +18,33 @@ data class ToolSlot(
     val sizePresets: List<Float>,
     val opacityPresets: List<Float> = listOf(0.25f, 0.5f, 0.75f, 1f),
     val smoothingPresets: List<Float> = listOf(0f, 0.25f, 0.5f, 1f),
+    /** Custom (stamp) brush id when [brush] is STAMP. */
+    val custom: String? = null,
 ) {
     companion object {
+        fun forCustom(b: com.omarkallas.inkfield.engine.CustomBrush): ToolSlot {
+            val s = b.defaultSize
+            return ToolSlot(
+                tool = ToolType.BRUSH, brush = BrushType.STAMP, size = s, opacity = b.defaultOpacity, smoothing = 0.2f,
+                sizePresets = listOf(s * 0.5f, s, s * 2f, s * 4f), custom = b.id,
+            )
+        }
+
         fun defaultFor(b: BrushType): ToolSlot {
             val s = b.defaultSize
             return ToolSlot(
                 tool = ToolType.BRUSH, brush = b, size = s,
-                opacity = when (b) { BrushType.MARKER -> 0.55f; BrushType.AIRBRUSH -> 0.35f; else -> 1f },
+                opacity = when (b) { BrushType.MARKER -> 0.55f; BrushType.AIRBRUSH -> 0.35f; BrushType.WATERCOLOR -> 0.8f; else -> 1f },
                 smoothing = if (b == BrushType.WIRE) 0.4f else 0.25f,
                 sizePresets = listOf(s * 0.5f, s, s * 2f, s * 4f),
             )
         }
 
-        fun tool(t: ToolType): ToolSlot = ToolSlot(
-            tool = t, size = if (t == ToolType.SLICE) 24f else 1f,
-            sizePresets = if (t == ToolType.SLICE) listOf(8f, 24f, 60f, 120f) else listOf(1f, 1f, 1f, 1f),
-        )
+        fun tool(t: ToolType): ToolSlot = when (t) {
+            ToolType.SLICE, ToolType.NUDGE -> ToolSlot(tool = t, size = if (t == ToolType.SLICE) 24f else 80f, sizePresets = listOf(8f, 24f, 60f, 120f))
+            ToolType.TEXT -> ToolSlot(tool = t, size = 24f, sizePresets = listOf(12f, 24f, 48f, 96f))
+            else -> ToolSlot(tool = t, size = 1f, sizePresets = listOf(1f, 1f, 1f, 1f))
+        }
 
         val defaults: List<ToolSlot> = listOf(
             defaultFor(BrushType.PEN),
@@ -47,6 +58,9 @@ data class ToolSlot(
         )
     }
 }
+
+@Serializable
+data class NamedPalette(val name: String, val colors: List<Int>)
 
 enum class FingerMode(val label: String) {
     AUTO("Auto: draw until a stylus is used"),
@@ -73,6 +87,26 @@ class Prefs(context: Context) {
         get() = sp.getInt("color", 0xFF1B1B1F.toInt())
         set(v) = sp.edit().putInt("color", v).apply()
 
+    var palettes: List<NamedPalette>
+        get() = sp.getString("palettes", null)
+            ?.let { runCatching { json.decodeFromString(ListSerializer(NamedPalette.serializer()), it) }.getOrNull() }
+            ?.takeIf { it.isNotEmpty() }
+            ?: listOf(NamedPalette("Palette 1", palette))
+        set(v) = sp.edit().putString("palettes", json.encodeToString(ListSerializer(NamedPalette.serializer()), v)).apply()
+
+    var activePalette: Int
+        get() = sp.getInt("activePalette", 0)
+        set(v) = sp.edit().putInt("activePalette", v).apply()
+
+    var paletteStrip: Boolean
+        get() = sp.getBoolean("paletteStrip", true)
+        set(v) = sp.edit().putBoolean("paletteStrip", v).apply()
+
+    var objectsOpen: Boolean
+        get() = sp.getBoolean("objectsOpen", false)
+        set(v) = sp.edit().putBoolean("objectsOpen", v).apply()
+
+    /** Legacy single palette (kept for migration). */
     var palette: List<Int>
         get() = sp.getString("palette", null)
             ?.let { runCatching { json.decodeFromString(ListSerializer(Int.serializer()), it) }.getOrNull() }

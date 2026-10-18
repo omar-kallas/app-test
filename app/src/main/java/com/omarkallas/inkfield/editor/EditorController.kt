@@ -52,8 +52,12 @@ class EditorController(initial: Drawing, val prefs: Prefs) {
     var color by mutableIntStateOf(prefs.color)
 
         private set
-    var palette by mutableStateOf(prefs.palette)
+    var palettes by mutableStateOf(prefs.palettes)
         private set
+    var activePalette by mutableIntStateOf(prefs.activePalette.coerceIn(0, prefs.palettes.size - 1))
+        private set
+    /** Colors of the active palette. */
+    val palette: List<Int> get() = palettes.getOrNull(activePalette)?.colors ?: Prefs.DEFAULT_PALETTE
 
     // ---- selection ----
     var selection by mutableStateOf<Set<Long>>(emptySet())
@@ -145,7 +149,8 @@ class EditorController(initial: Drawing, val prefs: Prefs) {
 
     /** Layer that a new stroke with [brush] goes to; creates a family layer in Automatic mode. */
     private fun targetLayer(d: Drawing, brush: BrushType): Pair<Drawing, Long> {
-        if (!d.autoLayers) return d to d.activeLayer.id
+        // Masks erase what lies beneath on the layer being worked on.
+        if (!d.autoLayers || brush.isMask) return d to d.activeLayer.id
         val existing = d.layers.firstOrNull { it.family == brush.family }
         if (existing != null) return d.copy(activeLayerId = existing.id) to existing.id
         // Reuse a still-empty default layer before creating a new one.
@@ -209,7 +214,7 @@ class EditorController(initial: Drawing, val prefs: Prefs) {
         val s = Stroke(
             id = d.nextId, brush = brush, size = slot.size, color = color,
             opacity = slot.opacity, smoothing = smoothing ?: slot.smoothing, layerId = layerId, pts = pts,
-            measured = measured,
+            measured = measured, customBrush = if (brush == BrushType.STAMP) slot.custom else null,
         )
         // Show a hidden target layer rather than drawing invisibly.
         val layers = d.layers.map { if (it.id == layerId && !it.visible) it.copy(visible = true) else it }
@@ -241,13 +246,149 @@ class EditorController(initial: Drawing, val prefs: Prefs) {
     }
 
     // ---- selection ----
+    /** Selection filters: include locked strokes; only the active layer. */
+    var includeLocked by mutableStateOf(false)
+    var activeLayerOnly by mutableStateOf(false)
+
     fun selectLasso(poly: FloatArray) {
-        val ids = EditOps.lasso(drawing, cache, poly, partialLasso, activeLayerOnly = false)
-        selection = ids
+        val ids = EditOps.lasso(drawing, cache, poly, partialLasso, activeLayerOnly, includeLocked)
+        selection = expandGroups(ids)
         prefs.partialLasso = partialLasso
     }
 
-    fun selectIds(ids: Set<Long>) { selection = ids }
+    fun selectIds(ids: Set<Long>) { selection = expandGroups(ids) }
+
+    /** Selecting any member of a group selects the whole group. */
+    private fun expandGroups(ids: Set<Long>): Set<Long> {
+        val groups = drawing.strokes.filter { it.id in ids }.mapNotNull { it.groupId }.toSet()
+        if (groups.isEmpty()) return ids
+        return ids + drawing.strokes.filter { it.groupId in groups }.map { it.id }
+    }
+
+    val selectionIsGroup: Boolean
+        get() {
+            val sel = selectedStrokes()
+            val g = sel.firstOrNull()?.groupId ?: return false
+            return sel.size > 1 && sel.all { it.groupId == g }
+        }
+
+    fun groupSelection() {
+        if (selection.size < 2) return
+        val gid = drawing.nextId
+        commit(drawing.copy(strokes = drawing.strokes.map { if (it.id in selection) it.copy(groupId = gid) else it }, nextId = gid + 1))
+    }
+
+    fun ungroupSelection() = restyleSelection { it.copy(groupId = null) }
+
+    fun lockSelection() {
+        restyleSelection { it.copy(locked = true) }
+        selection = emptySet()
+    }
+
+    fun unlockAll() = commit(drawing.copy(strokes = drawing.strokes.map { if (it.locked) it.copy(locked = false) else it }))
+
+    // ---- nudge: one undo step per gesture ----
+    private val nudged = HashSet<Long>()
+    fun nudgeBegin() { sliceBase = drawing; nudged.clear() }
+    fun nudgeStep(cx: Float, cy: Float, dx: Float, dy: Float, r: Float) {
+        val next = EditOps.nudge(drawing, cache, cx, cy, dx, dy, r, nudged) ?: return
+        drawing = next
+        version++
+    }
+    fun nudgeEnd() = sliceEnd()
+
+    // ---- text and images ----
+    /** Set by the Text tool: where the user tapped, waiting for the text to type. */
+    /** Bumped when user brushes change so menus refresh. */
+    var brushesVersion by mutableIntStateOf(0)
+        private set
+    fun refreshBrushes() { brushesVersion++; cache.clear(); version++ }
+
+    var textRequest by mutableStateOf<com.omarkallas.inkfield.model.Pt?>(null)
+    /** Set when the Text tool taps an existing label (or the selection's Edit text button). */
+    var textEditId by mutableStateOf<Long?>(null)
+
+    fun addText(text: String, x: Float, y: Float) {
+        if (text.isBlank()) return
+        val size = if (slot.tool == ToolType.TEXT) slot.size else 24f
+        val (w, h) = com.omarkallas.inkfield.engine.Renderer.textBox(text, size)
+        val pts = floatArrayOf(x, y, 0.6f, 0f, x + w, y, 0.6f, 0f, x, y + h, 0.6f, 0f)
+        addItem(BrushType.TEXT, pts, size, text = text)
+    }
+
+    /** Replaces a text item's string, keeping its position, rotation and scale. */
+    fun editText(id: Long, text: String) {
+        val s = drawing.strokes.firstOrNull { it.id == id && it.brush == BrushType.TEXT } ?: return
+        if (text.isBlank()) { commit(drawing.copy(strokes = drawing.strokes.filter { it.id != id })); selection = emptySet(); return }
+        val (ow, oh) = com.omarkallas.inkfield.engine.Renderer.textBox(s.text ?: "", s.size)
+        val (nw, nh) = com.omarkallas.inkfield.engine.Renderer.textBox(text, s.size)
+        val p = s.pts.copyOf()
+        val st = Stroke.STRIDE
+        val ox = p[0]; val oy = p[1]
+        p[st] = ox + (p[st] - ox) * nw / ow; p[st + 1] = oy + (p[st + 1] - oy) * nw / ow
+        p[2 * st] = ox + (p[2 * st] - ox) * nh / oh; p[2 * st + 1] = oy + (p[2 * st + 1] - oy) * nh / oh
+        commit(drawing.copy(strokes = drawing.strokes.map { if (it.id == id) it.copy(text = text, pts = p) else it }))
+    }
+
+    /** Places an image asset centered at (cx, cy), fitted inside [maxW]×[maxH] canvas units. */
+    fun addImage(asset: String, bw: Int, bh: Int, cx: Float, cy: Float, maxW: Float, maxH: Float): Long {
+        val k = minOf(maxW / bw, maxH / bh, 1f / 0.001f)
+        val w = bw * k; val h = bh * k
+        val x = cx - w / 2f; val y = cy - h / 2f
+        val pts = floatArrayOf(x, y, 0.6f, 0f, x + w, y, 0.6f, 0f, x, y + h, 0.6f, 0f)
+        return addItem(BrushType.IMAGE, pts, 1f, asset = asset)
+    }
+
+    /** Places an image asset exactly at the given canvas rectangle. */
+    fun addImageRect(asset: String, x: Float, y: Float, w: Float, h: Float): Long {
+        val pts = floatArrayOf(x, y, 0.6f, 0f, x + w, y, 0.6f, 0f, x, y + h, 0.6f, 0f)
+        return addItem(BrushType.IMAGE, pts, 1f, asset = asset)
+    }
+
+    /** Distort mode: dragging a selection corner moves only that corner. */
+    var distortMode by mutableStateOf(false)
+
+    private fun addItem(type: BrushType, pts: FloatArray, size: Float, text: String? = null, asset: String? = null): Long {
+        val (d, layerId) = targetLayer(drawing, type)
+        val s = Stroke(
+            id = d.nextId, brush = type, size = size, color = if (type == BrushType.TEXT) color else 0xFFFFFFFF.toInt(),
+            opacity = 1f, smoothing = 0f, layerId = layerId, pts = pts, text = text, asset = asset,
+        )
+        commit(d.copy(strokes = d.strokes + s, nextId = d.nextId + 1))
+        selection = setOf(s.id)
+        return s.id
+    }
+
+    /** Adds several strokes (an object from the library) as one selected group. */
+    fun addGroup(strokes: List<Stroke>) {
+        if (strokes.isEmpty()) return
+        var d = drawing
+        var id = d.nextId
+        val gid = id++
+        val placed = strokes.map { st ->
+            val (nd, layerId) = targetLayer(d, st.brush)
+            d = nd
+            st.copy(id = id++, layerId = layerId, groupId = if (strokes.size > 1) gid else null)
+        }
+        commit(d.copy(strokes = d.strokes + placed, nextId = id))
+        selection = placed.mapTo(HashSet()) { it.id }
+    }
+
+    // ---- quick clear ----
+    enum class ClearWhat { LAYER, STROKES, TEXT, IMAGES, MEASUREMENTS }
+
+    fun quickClear(what: ClearWhat) {
+        val d = drawing
+        val kept = when (what) {
+            ClearWhat.LAYER -> d.strokes.filter { it.layerId != d.activeLayerId }
+            ClearWhat.STROKES -> d.strokes.filter { it.brush.isItem }
+            ClearWhat.TEXT -> d.strokes.filter { it.brush != BrushType.TEXT }
+            ClearWhat.IMAGES -> d.strokes.filter { it.brush != BrushType.IMAGE }
+            ClearWhat.MEASUREMENTS -> d.strokes.map { if (it.measured) it.copy(measured = false) else it }
+        }
+        commit(d.copy(strokes = kept))
+        pruneSelection()
+    }
 
     fun clearSelection() { selection = emptySet() }
 
@@ -323,8 +464,14 @@ class EditorController(initial: Drawing, val prefs: Prefs) {
         } else old.copy(tool = tool, brush = brush)
         updateSlot(i, ns)
         if (selection.isNotEmpty() && tool == ToolType.BRUSH && i == activeSlot) {
-            restyleSelection { it.copy(brush = brush) }
+            restyleSelection { if (it.brush.isItem) it else it.copy(brush = brush, customBrush = null) }
         }
+    }
+
+    fun setSlotCustom(i: Int, b: com.omarkallas.inkfield.engine.CustomBrush) {
+        if (i !in slots.indices) return
+        updateSlot(i, ToolSlot.forCustom(b))
+        if (selection.isNotEmpty() && i == activeSlot) restyleSelection { if (it.brush.isItem) it else it.copy(brush = BrushType.STAMP, customBrush = b.id) }
     }
 
     fun setSlotTool(i: Int, tool: ToolType) {
@@ -370,8 +517,58 @@ class EditorController(initial: Drawing, val prefs: Prefs) {
     }
 
     fun setPaletteColor(index: Int, c: Int) {
-        palette = palette.toMutableList().also { if (index in it.indices) it[index] = c }
-        prefs.palette = palette
+        val p = palettes.getOrNull(activePalette) ?: return
+        val colors = p.colors.toMutableList().also { if (index in it.indices) it[index] = c }
+        savePalettes(palettes.toMutableList().also { it[activePalette] = p.copy(colors = colors) })
+    }
+
+    private fun savePalettes(list: List<com.omarkallas.inkfield.prefs.NamedPalette>) {
+        palettes = list
+        prefs.palettes = list
+        activePalette = activePalette.coerceIn(0, list.size - 1)
+        prefs.activePalette = activePalette
+    }
+
+    var paletteStrip by mutableStateOf(prefs.paletteStrip)
+        private set
+    fun togglePaletteStrip() { paletteStrip = !paletteStrip; prefs.paletteStrip = paletteStrip }
+
+    fun selectPalette(i: Int) {
+        if (palettes.isEmpty()) return
+        activePalette = Math.floorMod(i, palettes.size)
+        prefs.activePalette = activePalette
+    }
+
+    /** Adds a palette seeded with harmonies of the current color and makes it active. */
+    fun newPalette() {
+        savePalettes(palettes + com.omarkallas.inkfield.prefs.NamedPalette("Palette ${palettes.size + 1}", harmony(color)))
+        selectPalette(palettes.size - 1)
+    }
+
+    fun deletePalette() {
+        if (palettes.size <= 1) return
+        savePalettes(palettes.filterIndexed { i, _ -> i != activePalette })
+    }
+
+    fun renamePalette(name: String) {
+        val p = palettes.getOrNull(activePalette) ?: return
+        savePalettes(palettes.toMutableList().also { it[activePalette] = p.copy(name = name.ifBlank { p.name }) })
+    }
+
+    fun importPalettes(list: List<com.omarkallas.inkfield.prefs.NamedPalette>) {
+        val clean = list.map { it.copy(colors = (it.colors + Prefs.DEFAULT_PALETTE).take(8)) }
+        if (clean.isNotEmpty()) savePalettes(palettes + clean)
+    }
+
+    /** Eight colors that go with [c]: complement, analogous, triadic, split complements, a tint and a shade. */
+    fun harmony(c: Int): List<Int> {
+        val hsv = FloatArray(3); android.graphics.Color.colorToHSV(c, hsv)
+        fun hue(dh: Float, s: Float = hsv[1], v: Float = hsv[2]) =
+            android.graphics.Color.HSVToColor(floatArrayOf((hsv[0] + dh + 360f) % 360f, s.coerceIn(0f, 1f), v.coerceIn(0f, 1f)))
+        return listOf(
+            c or 0xFF000000.toInt(), hue(180f), hue(-30f), hue(30f), hue(120f), hue(-120f),
+            hue(0f, hsv[1] * 0.45f, minOf(1f, hsv[2] + 0.35f)), hue(0f, minOf(1f, hsv[1] + 0.1f), hsv[2] * 0.5f),
+        )
     }
 
     /** Copies the brush, size and color of the stroke under the point into the active slot. */

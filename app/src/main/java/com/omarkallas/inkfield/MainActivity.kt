@@ -33,6 +33,17 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         repo = Repository(applicationContext)
         prefs = Prefs(applicationContext)
+        com.omarkallas.inkfield.engine.Assets.init(applicationContext)
+        com.omarkallas.inkfield.engine.BrushLib.init(applicationContext)
+        com.omarkallas.inkfield.engine.ObjectLibrary.init(applicationContext)
+        // Remove image files that no drawing (or object pack) uses any more.
+        Thread {
+            runCatching {
+                val referenced = repo.referencedAssets() + com.omarkallas.inkfield.engine.ObjectLibrary.userPacks
+                    .flatMap { p -> p.objects.flatMap { o -> o.strokes.mapNotNull { it.asset } } }
+                com.omarkallas.inkfield.engine.Assets.collect(referenced.toSet())
+            }
+        }.start()
         setContent { InkTheme { App() } }
     }
 

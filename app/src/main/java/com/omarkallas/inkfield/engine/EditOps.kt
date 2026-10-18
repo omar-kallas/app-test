@@ -43,7 +43,7 @@ object EditOps {
         val out = ArrayList<Stroke>(d.strokes.size + 4)
         for (s in d.strokes) {
             val layer = d.layer(s.layerId)
-            if (layer == null || !layer.visible || layer.locked) { out.add(s); continue }
+            if (layer == null || !layer.visible || layer.locked || s.locked || s.brush.isItem) { out.add(s); continue }
             val e = cache.get(s)
             val b = e.processed.bounds
             if (b.right < minX || b.left > maxX || b.bottom < minY || b.top > maxY) { out.add(s); continue }
@@ -100,7 +100,7 @@ object EditOps {
     }
 
     /** Ids of strokes the lasso polygon selects. */
-    fun lasso(d: Drawing, cache: StrokeCache, poly: FloatArray, partial: Boolean, activeLayerOnly: Boolean): Set<Long> {
+    fun lasso(d: Drawing, cache: StrokeCache, poly: FloatArray, partial: Boolean, activeLayerOnly: Boolean, includeLocked: Boolean = false): Set<Long> {
         if (poly.size < 6) return emptySet()
         var minX = Float.MAX_VALUE; var minY = Float.MAX_VALUE; var maxX = -Float.MAX_VALUE; var maxY = -Float.MAX_VALUE
         for (i in poly.indices step 2) {
@@ -111,6 +111,7 @@ object EditOps {
         for (s in d.strokes) {
             val layer = d.layer(s.layerId) ?: continue
             if (!layer.visible || layer.locked) continue
+            if (s.locked && !includeLocked) continue
             if (activeLayerOnly && s.layerId != d.activeLayerId) continue
             val pr = cache.get(s).processed
             val b = pr.bounds
@@ -128,11 +129,21 @@ object EditOps {
     }
 
     /** Topmost unlocked stroke within [r] of the point, or null. */
-    fun pick(d: Drawing, cache: StrokeCache, x: Float, y: Float, r: Float): Stroke? {
+    fun pick(d: Drawing, cache: StrokeCache, x: Float, y: Float, r: Float, includeLocked: Boolean = false): Stroke? {
         for (s in d.strokes.asReversed()) {
             val layer = d.layer(s.layerId) ?: continue
             if (!layer.visible || layer.locked) continue
+            if (s.locked && !includeLocked) continue
             val pr = cache.get(s).processed
+            if (s.brush.isItem) {
+                val poly = FloatArray(pr.n * 2) { if (it % 2 == 0) pr.x[it / 2] else pr.y[it / 2] }
+                if (pr.n >= 3 && Geometry.pointInPolygon(x, y, poly)) return s
+                continue
+            }
+            if (s.brush == com.omarkallas.inkfield.model.BrushType.FILL && pr.n >= 3) {
+                val poly = FloatArray(pr.n * 2) { if (it % 2 == 0) pr.x[it / 2] else pr.y[it / 2] }
+                if (Geometry.pointInPolygon(x, y, poly)) return s
+            }
             val b = pr.bounds
             if (x < b.left - r || x > b.right + r || y < b.top - r || y > b.bottom + r) continue
             val hwMax = if (s.brush.isCenterline) s.size * 0.5f else 0f
@@ -143,5 +154,61 @@ object EditOps {
             }
         }
         return null
+    }
+
+    /**
+     * Pushes strokes near (cx, cy) by (dx, dy) with a smooth falloff over radius [r].
+     * Strokes are first converted to their visible (smoothed, densified) geometry so they bend where they are seen;
+     * [converted] remembers which strokes were already converted during this gesture.
+     */
+    fun nudge(d: Drawing, cache: StrokeCache, cx: Float, cy: Float, dx: Float, dy: Float, r: Float, converted: MutableSet<Long>): Drawing? {
+        var changed = false
+        val out = ArrayList<Stroke>(d.strokes.size)
+        for (s in d.strokes) {
+            val layer = d.layer(s.layerId)
+            if (layer == null || !layer.visible || layer.locked || s.locked || s.brush.isItem || s.brush.isMask) { out.add(s); continue }
+            val b = cache.get(s).processed.bounds
+            if (cx < b.left - r || cx > b.right + r || cy < b.top - r || cy > b.bottom + r) { out.add(s); continue }
+            var pts = s.pts
+            var smoothing = s.smoothing
+            if (s.id !in converted) {
+                val pr = cache.get(s).processed
+                val list = ArrayList<Float>()
+                val step = max(r / 6f, 0.5f)
+                for (i in 0 until pr.n) {
+                    if (i > 0) {
+                        val dist = hypot(pr.x[i] - pr.x[i - 1], pr.y[i] - pr.y[i - 1])
+                        val k = ceil(dist / step).toInt()
+                        for (j in 1 until k) {
+                            val u = j.toFloat() / k
+                            list.add(pr.x[i - 1] + (pr.x[i] - pr.x[i - 1]) * u); list.add(pr.y[i - 1] + (pr.y[i] - pr.y[i - 1]) * u)
+                            list.add(pr.p[i - 1] + (pr.p[i] - pr.p[i - 1]) * u); list.add(pr.t[i - 1] + (pr.t[i] - pr.t[i - 1]) * u)
+                        }
+                    }
+                    list.add(pr.x[i]); list.add(pr.y[i]); list.add(pr.p[i]); list.add(pr.t[i])
+                }
+                pts = list.toFloatArray()
+                smoothing = 0f
+            }
+            var moved = false
+            val np = pts.copyOf()
+            var i = 0
+            while (i < np.size) {
+                val dist = hypot(np[i] - cx, np[i + 1] - cy)
+                if (dist < r) {
+                    val u = 1f - (dist / r) * (dist / r)
+                    val w = u * u
+                    np[i] += dx * w; np[i + 1] += dy * w
+                    moved = true
+                }
+                i += Stroke.STRIDE
+            }
+            if (moved) {
+                converted.add(s.id)
+                out.add(s.copy(pts = np, smoothing = smoothing))
+                changed = true
+            } else out.add(s)
+        }
+        return if (changed) d.copy(strokes = out) else null
     }
 }

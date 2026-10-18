@@ -48,7 +48,7 @@ import kotlin.math.roundToInt
 @SuppressLint("ViewConstructor")
 class DrawingView(context: Context, private val ctl: EditorController) : View(context) {
 
-    private enum class Mode { NONE, DRAW, NAVIGATE, LASSO, SLICE, SEL_MOVE, SEL_SCALE, SEL_ROTATE, SEL_PINCH, EYEDROP, GUIDE_EDIT, GRID_EDIT, IGNORE }
+    private enum class Mode { NONE, DRAW, NAVIGATE, LASSO, SLICE, SEL_MOVE, SEL_SCALE, SEL_ROTATE, SEL_PINCH, SEL_DISTORT, EYEDROP, GUIDE_EDIT, GRID_EDIT, NUDGE, TEXT_TAP, IGNORE }
 
     private val density = resources.displayMetrics.density
     private val touchSlop = ViewConfiguration.get(context).scaledTouchSlop.toFloat()
@@ -215,7 +215,7 @@ class DrawingView(context: Context, private val ctl: EditorController) : View(co
         if (sel.isNotEmpty()) drawSelectionOverlay(canvas)
         if (mode == Mode.LASSO && lassoCount >= 2) drawLasso(canvas)
         if (mode == Mode.EYEDROP) drawLoupe(canvas)
-        if (mode == Mode.SLICE && cursor.x >= 0f) {
+        if ((mode == Mode.SLICE || mode == Mode.NUDGE) && cursor.x >= 0f) {
             overlayPaint.style = Paint.Style.STROKE
             overlayPaint.strokeWidth = 1.5f * density
             overlayPaint.color = 0x99000000.toInt()
@@ -228,10 +228,10 @@ class DrawingView(context: Context, private val ctl: EditorController) : View(co
         val (pts, sm) = finalLivePoints(includePredicted = true)
         if (pts.isEmpty()) return
         val slot = ctl.slot
-        val s = Stroke(-1, liveBrush, slot.size, ctl.color, slot.opacity, sm ?: slot.smoothing, -1, pts)
+        val s = Stroke(-1, liveBrush, slot.size, ctl.color, slot.opacity, sm ?: slot.smoothing, -1, pts, customBrush = slot.custom)
         val pr = Geometry.process(s)
         val entry = StrokeCache.Entry(s, pr, Geometry.buildPath(s, pr))
-        Renderer.drawEntry(canvas, entry, scale)
+        Renderer.drawEntry(canvas, entry, scale, live = true)
     }
 
     private fun drawLasso(canvas: Canvas) {
@@ -394,6 +394,8 @@ class DrawingView(context: Context, private val ctl: EditorController) : View(co
             ToolType.SELECT -> startLasso(e.x, e.y)
             ToolType.PAN -> startNavigate(e)
             ToolType.EYEDROPPER -> startEyedrop(e.x, e.y)
+            ToolType.NUDGE -> startNudge(e.x, e.y)
+            ToolType.TEXT -> { mode = Mode.TEXT_TAP; toCanvas(e.x, e.y, lastCanvasPt) }
         }
     }
 
@@ -426,7 +428,7 @@ class DrawingView(context: Context, private val ctl: EditorController) : View(co
             Mode.DRAW -> { discardLive(); startNavigate(e) }
             Mode.LASSO -> { lassoCount = 0; startNavigate(e) }
             Mode.SLICE -> { ctl.sliceEnd(); startNavigate(e) }
-            Mode.SEL_MOVE, Mode.SEL_SCALE, Mode.SEL_ROTATE, Mode.SEL_PINCH -> startSelPinch(e)
+            Mode.SEL_MOVE, Mode.SEL_SCALE, Mode.SEL_ROTATE, Mode.SEL_PINCH, Mode.SEL_DISTORT -> startSelPinch(e)
             Mode.NAVIGATE -> startNavigate(e)
             else -> {}
         }
@@ -447,10 +449,11 @@ class DrawingView(context: Context, private val ctl: EditorController) : View(co
             Mode.NAVIGATE -> navigate(e)
             Mode.LASSO -> { addLasso(e.getX(idx), e.getY(idx)); invalidate() }
             Mode.SLICE -> sliceMove(e, idx)
-            Mode.SEL_MOVE, Mode.SEL_SCALE, Mode.SEL_ROTATE -> selDrag(e.getX(idx), e.getY(idx))
+            Mode.SEL_MOVE, Mode.SEL_SCALE, Mode.SEL_ROTATE, Mode.SEL_DISTORT -> selDrag(e.getX(idx), e.getY(idx))
             Mode.SEL_PINCH -> selPinch(e)
             Mode.EYEDROP -> { sampleAt(e.getX(idx), e.getY(idx)); invalidate() }
             Mode.GUIDE_EDIT -> guideDrag(e.getX(idx), e.getY(idx))
+            Mode.NUDGE -> nudgeMove(e, idx)
             Mode.GRID_EDIT -> gridDrag(e.getX(idx), e.getY(idx))
             else -> {}
         }
@@ -480,9 +483,15 @@ class DrawingView(context: Context, private val ctl: EditorController) : View(co
                 else if (quick && gestureMaxPointers == 3) ctl.redo()
                 else if (quick && gestureMaxPointers == 1 && ctl.selection.isNotEmpty()) ctl.clearSelection()
             }
-            Mode.SEL_MOVE, Mode.SEL_SCALE, Mode.SEL_ROTATE, Mode.SEL_PINCH -> commitSelectionTransform()
+            Mode.SEL_MOVE, Mode.SEL_SCALE, Mode.SEL_ROTATE, Mode.SEL_PINCH, Mode.SEL_DISTORT -> commitSelectionTransform()
             Mode.EYEDROP -> finishEyedrop()
             Mode.GUIDE_EDIT, Mode.GRID_EDIT -> { editGuideStart = null; editGridStart = null }
+            Mode.NUDGE -> ctl.nudgeEnd()
+            Mode.TEXT_TAP -> if (!gestureMoved) {
+                val hit = EditOps.pick(ctl.drawing, ctl.cache, lastCanvasPt.x, lastCanvasPt.y, 6f * density / scaleOf(view))
+                if (hit != null && hit.brush == com.omarkallas.inkfield.model.BrushType.TEXT) ctl.textEditId = hit.id
+                else ctl.textRequest = Pt(lastCanvasPt.x, lastCanvasPt.y)
+            }
             Mode.IGNORE -> {
                 val quick = e.eventTime - gestureStartTime < 350 && !gestureMoved
                 if (!gestureFromStylus && quick && gestureMaxPointers == 2) ctl.undo()
@@ -502,7 +511,8 @@ class DrawingView(context: Context, private val ctl: EditorController) : View(co
         when (mode) {
             Mode.DRAW -> { cancelRecognition(); recognized = null; discardLive() }
             Mode.SLICE -> ctl.sliceEnd()
-            Mode.SEL_MOVE, Mode.SEL_SCALE, Mode.SEL_ROTATE, Mode.SEL_PINCH -> { selMatrix.reset(); selHasTransform = false }
+            Mode.NUDGE -> ctl.nudgeEnd()
+            Mode.SEL_MOVE, Mode.SEL_SCALE, Mode.SEL_ROTATE, Mode.SEL_PINCH, Mode.SEL_DISTORT -> { selMatrix.reset(); selHasTransform = false }
             Mode.NAVIGATE -> ctl.setViewport(currentViewport())
             Mode.EYEDROP -> { dropSnapshot?.recycle(); dropSnapshot = null }
             else -> {}
@@ -780,6 +790,12 @@ class DrawingView(context: Context, private val ctl: EditorController) : View(co
         }
         val canvasCorners = floatArrayOf(b.left, b.top, b.right, b.top, b.right, b.bottom, b.left, b.bottom)
         for (i in 0 until 4) {
+            if (hypot(c[i * 2] - x, c[i * 2 + 1] - y) < hitR && ctl.distortMode) {
+                mode = Mode.SEL_DISTORT
+                distortCorner = i
+                System.arraycopy(canvasCorners, 0, distortSrc, 0, 8)
+                return true
+            }
             if (hypot(c[i * 2] - x, c[i * 2 + 1] - y) < hitR) {
                 mode = Mode.SEL_SCALE
                 val opp = (i + 2) % 4
@@ -810,6 +826,11 @@ class DrawingView(context: Context, private val ctl: EditorController) : View(co
                 val l2 = (dx * dx + dy * dy).coerceAtLeast(1e-4f)
                 val k = (((p.x - selAnchor.x) * dx + (p.y - selAnchor.y) * dy) / l2).coerceIn(0.03f, 50f)
                 selMatrix.setScale(k, k, selAnchor.x, selAnchor.y)
+            }
+            Mode.SEL_DISTORT -> {
+                val dst = distortSrc.copyOf()
+                dst[distortCorner * 2] = p.x; dst[distortCorner * 2 + 1] = p.y
+                selMatrix.setPolyToPoly(distortSrc, 0, dst, 0, 4)
             }
             Mode.SEL_ROTATE -> {
                 val ang = atan2(p.y - selCenter.y, p.x - selCenter.x)
@@ -861,8 +882,18 @@ class DrawingView(context: Context, private val ctl: EditorController) : View(co
         invalidate()
     }
 
+    private var distortCorner = 0
+    private val distortSrc = FloatArray(8)
+
     private fun commitSelectionTransform() {
-        if (selHasTransform && !selMatrix.isIdentity) ctl.transformSelection(Matrix(selMatrix))
+        if (selHasTransform && !selMatrix.isIdentity) {
+            if (mode == Mode.SEL_DISTORT) {
+                val keep = ctl.selectionScaleWidths
+                ctl.selectionScaleWidths = false
+                ctl.transformSelection(Matrix(selMatrix))
+                ctl.selectionScaleWidths = keep
+            } else ctl.transformSelection(Matrix(selMatrix))
+        }
         selMatrix.reset()
         selHasTransform = false
         invalidate()
@@ -1292,5 +1323,24 @@ class DrawingView(context: Context, private val ctl: EditorController) : View(co
             pts[0] = lp[(n - 1) * Stroke.STRIDE]; pts[1] = lp[(n - 1) * Stroke.STRIDE + 1]; view.mapPoints(pts)
             drawLabel(canvas, Units.length(len, m), pts[0] + 34f * density, pts[1] - 24f * density)
         }
+    }
+
+    // ---- nudge ----
+    private fun startNudge(x: Float, y: Float) {
+        mode = Mode.NUDGE
+        ctl.nudgeBegin()
+        toCanvas(x, y, lastCanvasPt)
+        cursor.set(x, y)
+        invalidate()
+    }
+
+    private fun nudgeMove(e: MotionEvent, idx: Int) {
+        val p = PointF()
+        toCanvas(e.getX(idx), e.getY(idx), p)
+        val r = (ctl.slot.size / 2f) / scaleOf(view)
+        ctl.nudgeStep(lastCanvasPt.x, lastCanvasPt.y, p.x - lastCanvasPt.x, p.y - lastCanvasPt.y, r)
+        lastCanvasPt.set(p)
+        cursor.set(e.getX(idx), e.getY(idx))
+        invalidate()
     }
 }

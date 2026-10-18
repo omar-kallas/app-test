@@ -132,6 +132,9 @@ object Exporter {
             sb.append(">\n")
             for (s in list) {
                 val e = cache.get(s)
+                if (s.brush.isMask) continue // masks only exist in raster output
+                if (s.brush == BrushType.TEXT) { svgText(sb, s); continue }
+                if (s.brush == BrushType.IMAGE) { svgImage(sb, s); continue }
                 val pathData = svgPath(e.path)
                 if (pathData.isEmpty()) continue
                 val a = Color.alpha(s.color) / 255f * s.opacity
@@ -155,6 +158,35 @@ object Exporter {
         }
         sb.append("</svg>\n")
         return sb.toString()
+    }
+
+    private fun svgMatrix(m: android.graphics.Matrix): String {
+        val v = FloatArray(9); m.getValues(v)
+        return "matrix(${f(v[0])} ${f(v[3])} ${f(v[1])} ${f(v[4])} ${f(v[2])} ${f(v[5])})"
+    }
+
+    private fun svgText(sb: StringBuilder, s: com.omarkallas.inkfield.model.Stroke) {
+        val text = s.text ?: return
+        val (w, h) = Renderer.textBox(text, s.size)
+        val m = Renderer.frameMatrix(s, w, h) ?: return
+        val a = Color.alpha(s.color) / 255f * s.opacity
+        sb.append("""<text transform="${svgMatrix(m)}" font-family="sans-serif" font-size="${f(s.size)}" fill="${hex(s.color)}"""")
+        if (a < 0.999f) sb.append(""" fill-opacity="${f(a)}"""")
+        sb.append(">")
+        text.split('\n').forEachIndexed { i, line ->
+            sb.append("""<tspan x="0" y="${f(s.size * (1.25f * i + 1f))}">${escape(line)}</tspan>""")
+        }
+        sb.append("</text>\n")
+    }
+
+    private fun svgImage(sb: StringBuilder, s: com.omarkallas.inkfield.model.Stroke) {
+        val name = s.asset ?: return
+        val bmp = Assets.get(name) ?: return
+        val bytes = Assets.bytes(name) ?: return
+        val mime = if (name.endsWith(".png")) "image/png" else "image/jpeg"
+        val m = Renderer.frameMatrix(s, bmp.width.toFloat(), bmp.height.toFloat()) ?: return
+        val b64 = android.util.Base64.encodeToString(bytes, android.util.Base64.NO_WRAP)
+        sb.append("""<image width="${bmp.width}" height="${bmp.height}" transform="${svgMatrix(m)}" href="data:$mime;base64,$b64"/>""").append('\n')
     }
 
     /** Flattens an android Path into SVG path data using Path.approximate (API 26+). */

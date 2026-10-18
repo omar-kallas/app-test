@@ -41,6 +41,7 @@ class Processed(
 object Geometry {
 
     fun process(s: Stroke): Processed {
+        if (s.brush.isItem) return frame(s)
         val n0 = s.count
         if (n0 == 0) return Processed(0, FloatArray(0), FloatArray(0), FloatArray(0), FloatArray(0), FloatArray(0))
         val st = Stroke.STRIDE
@@ -121,7 +122,30 @@ object Geometry {
         return Processed(n, x, y, p, t, w).also { it.computeBounds(maxHalfWidth(s)) }
     }
 
+    /** Items keep their frame exactly: origin, x-end, far corner, y-end. */
+    private fun frame(s: Stroke): Processed {
+        val p = s.pts
+        if (p.size < 3 * Stroke.STRIDE) return Processed(0, FloatArray(0), FloatArray(0), FloatArray(0), FloatArray(0), FloatArray(0))
+        val st = Stroke.STRIDE
+        val ox = p[0]; val oy = p[1]; val ax = p[st]; val ay = p[st + 1]; val bx = p[2 * st]; val by = p[2 * st + 1]
+        val x = floatArrayOf(ox, ax, ax + bx - ox, bx)
+        val y = floatArrayOf(oy, ay, ay + by - oy, by)
+        return Processed(4, x, y, FloatArray(4) { 1f }, FloatArray(4), FloatArray(4)).also { it.computeBounds(0f) }
+    }
+
+    /** Signed area of the processed polygon (for Fill strokes). */
+    fun area(pr: Processed): Float {
+        var a = 0f
+        for (i in 0 until pr.n) {
+            val j = (i + 1) % pr.n
+            a += pr.x[i] * pr.y[j] - pr.x[j] * pr.y[i]
+        }
+        return abs(a) / 2f
+    }
+
     fun maxHalfWidth(s: Stroke): Float = when (s.brush) {
+        BrushType.STAMP -> s.size * 3f
+        BrushType.MASK_SOFT, BrushType.WATERCOLOR -> s.size
         BrushType.AIRBRUSH -> s.size
         BrushType.WIRE -> s.size * 8f + 4f // wire is screen-constant; pad generously for culling
         else -> s.size * 0.75f + 1f
@@ -157,6 +181,9 @@ object Geometry {
                 if (n > 1) out[0] = out[1]
             }
             BrushType.DYNAMIC -> for (i in 0 until n) out[i] = 0.12f + 1.25f * p[i].coerceIn(0f, 1f)
+            BrushType.SOFT_PENCIL -> for (i in 0 until n) out[i] = 0.45f + 0.9f * p[i].coerceIn(0f, 1f)
+            BrushType.HARD_PENCIL -> for (i in 0 until n) out[i] = 0.6f + 0.55f * p[i].coerceIn(0f, 1f)
+            BrushType.WATERCOLOR -> for (i in 0 until n) out[i] = 0.55f + 0.7f * p[i].coerceIn(0f, 1f)
             else -> {}
         }
         return out
@@ -188,6 +215,34 @@ object Geometry {
         val path = Path()
         val n = pr.n
         if (n == 0) return path
+        if (s.brush.isItem) {
+            path.moveTo(pr.x[0], pr.y[0]); for (i in 1 until n) path.lineTo(pr.x[i], pr.y[i]); path.close()
+            return path
+        }
+        if (s.brush == BrushType.FILL) {
+            if (n < 3) return path // a fill needs an area (fails at 100% smoothing)
+            path.moveTo(pr.x[0], pr.y[0])
+            for (i in 1 until n) path.lineTo(pr.x[i], pr.y[i])
+            path.close()
+            return path
+        }
+        if (s.brush == BrushType.DOTTED) {
+            val r = max(s.size / 2f, 0.3f)
+            val step = s.size * 2.2f + 0.5f
+            var carry = 0f
+            path.addCircle(pr.x[0], pr.y[0], r, Path.Direction.CW)
+            for (i in 1 until n) {
+                val dx = pr.x[i] - pr.x[i - 1]; val dy = pr.y[i] - pr.y[i - 1]
+                val len = hypot(dx, dy)
+                var d = step - carry
+                while (d <= len) {
+                    path.addCircle(pr.x[i - 1] + dx * d / len, pr.y[i - 1] + dy * d / len, r, Path.Direction.CW)
+                    d += step
+                }
+                carry = len - (d - step)
+            }
+            return path
+        }
         if (s.brush.isCenterline) {
             path.moveTo(pr.x[0], pr.y[0])
             if (n == 1) { path.lineTo(pr.x[0] + 0.01f, pr.y[0]); return path }

@@ -21,7 +21,7 @@ import androidx.compose.ui.unit.dp
 /** Monoline icons drawn in code, on a 24-unit grid. */
 enum class Glyph {
     GALLERY, LAYERS, EXPORT, SETTINGS, PAPER, HELP, PLUS, MORE, UNDO, REDO, TRASH, DUPLICATE,
-    FLIP_H, FLIP_V, CHECK, CLOSE, EYE, EYE_OFF, LOCK, UNLOCK, SHARE, RESTORE, PALETTE, PEN, DROPPER, RULER,
+    FLIP_H, FLIP_V, CHECK, CLOSE, EYE, EYE_OFF, LOCK, UNLOCK, SHARE, RESTORE, PALETTE, PEN, DROPPER, RULER, IMPORT, OBJECTS, TEXT,
 }
 
 @Composable
@@ -76,6 +76,9 @@ fun DrawScope.drawGlyph(g: Glyph, c: Color) {
         Glyph.UNLOCK -> { rrect(5f, 11f, 14f, 10f); path { m(8f, 11f); l(8f, 8f); q(8f, 4f, 12f, 4f); q(15f, 4f, 15.8f, 6.5f) } }
         Glyph.RESTORE -> { path { m(4f, 12f); q(4f, 4f, 12f, 4f); q(20f, 4f, 20f, 12f); q(20f, 20f, 12f, 20f); q(7f, 20f, 5f, 16f) }; path { m(2f, 9f); l(4f, 12f); l(7f, 10f) } }
         Glyph.PALETTE -> { circle(12f, 12f, 8.5f); circle(9f, 9f, 1.4f, true); circle(14.5f, 8f, 1.4f, true); circle(16.5f, 12.5f, 1.4f, true); circle(10f, 15f, 1.8f, true) }
+        Glyph.IMPORT -> { path { m(8f, 9f); l(4f, 9f); l(4f, 20f); l(20f, 20f); l(20f, 9f); l(16f, 9f) }; line(12f, 3f, 12f, 14f); path { m(8.5f, 10.5f); l(12f, 14f); l(15.5f, 10.5f) } }
+        Glyph.OBJECTS -> { circle(7.5f, 7.5f, 3.8f); path { m(16.5f, 3.5f); l(20.5f, 11f); l(12.5f, 11f); close() }; rrect(4f, 13.5f, 7f, 7f, 1.5f); path { m(13f, 17f); l(16.5f, 13.5f); l(20f, 17f); l(16.5f, 20.5f); close() } }
+        Glyph.TEXT -> { line(5f, 5f, 19f, 5f); line(12f, 5f, 12f, 20f); line(9f, 20f, 15f, 20f) }
         Glyph.RULER -> {
             path { m(3f, 15f); l(15f, 3f); l(21f, 9f); l(9f, 21f); close() }
             line(7f, 11f, 9f, 13f); line(10f, 8f, 12.5f, 10.5f); line(13f, 5f, 15f, 7f)

@@ -53,6 +53,16 @@ class Repository(context: Context) {
         }
     }
 
+    /** Asset file names referenced by any drawing, including ones in Recently Deleted. */
+    fun referencedAssets(): Set<String> {
+        val rx = Regex("\"asset\":\"([^\"]+)\"")
+        val out = HashSet<String>()
+        dir.listFiles { f -> f.name.endsWith(".json") }?.forEach { f ->
+            runCatching { rx.findAll(f.readText()).forEach { out.add(it.groupValues[1]) } }
+        }
+        return out
+    }
+
     fun loadThumb(id: String): Bitmap? {
         val f = thumbFile(id)
         return if (f.exists()) runCatching { BitmapFactory.decodeFile(f.path) }.getOrNull() else null

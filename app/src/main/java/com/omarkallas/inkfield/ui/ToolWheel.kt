@@ -54,6 +54,15 @@ import com.omarkallas.inkfield.editor.PropKind
 import com.omarkallas.inkfield.model.BrushType
 import com.omarkallas.inkfield.model.ToolType
 import com.omarkallas.inkfield.prefs.ToolSlot
+import com.omarkallas.inkfield.engine.BrushLib
+import com.omarkallas.inkfield.engine.CustomBrush
+import com.omarkallas.inkfield.engine.Geometry
+import com.omarkallas.inkfield.engine.Renderer
+import com.omarkallas.inkfield.model.Stroke
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
+import androidx.compose.ui.graphics.nativeCanvas
+import androidx.compose.ui.graphics.toArgb
 import kotlin.math.atan2
 import kotlin.math.cos
 import kotlin.math.exp
@@ -192,7 +201,10 @@ fun ToolWheel(
 fun DrawScope.drawSlotGlyph(slot: ToolSlot, c: Offset, r: Float, color: Color) {
     val ink = Ink.text
     when (slot.tool) {
-        ToolType.BRUSH -> drawBrushSample(slot.brush, c, r, color)
+        ToolType.BRUSH -> {
+            val cb = if (slot.brush == BrushType.STAMP) BrushLib.find(slot.custom) else null
+            if (cb != null) drawStampSample(cb, c, r, color) else drawBrushSample(slot.brush, c, r, color)
+        }
         ToolType.SLICE -> {
             val st = Stroke(r * 0.16f, cap = StrokeCap.Round)
             drawCircle(ink, r * 0.62f, c, style = st)
@@ -213,6 +225,18 @@ fun DrawScope.drawSlotGlyph(slot: ToolSlot, c: Offset, r: Float, color: Color) {
             drawLine(ink, Offset(c.x - r * 0.75f, c.y + r * 0.75f), Offset(c.x + r * 0.35f, c.y - r * 0.35f), w * 1.6f, StrokeCap.Round)
             drawCircle(ink, r * 0.32f, Offset(c.x + r * 0.52f, c.y - r * 0.52f))
             drawCircle(color, r * 0.18f, Offset(c.x - r * 0.75f, c.y + r * 0.75f))
+        }
+        ToolType.NUDGE -> {
+            val w = r * 0.14f
+            drawCircle(ink, r * 0.7f, c, style = Stroke(w))
+            drawLine(ink, Offset(c.x - r * 0.3f, c.y), Offset(c.x + r * 0.5f, c.y), w, StrokeCap.Round)
+            drawLine(ink, Offset(c.x + r * 0.5f, c.y), Offset(c.x + r * 0.2f, c.y - r * 0.3f), w, StrokeCap.Round)
+            drawLine(ink, Offset(c.x + r * 0.5f, c.y), Offset(c.x + r * 0.2f, c.y + r * 0.3f), w, StrokeCap.Round)
+        }
+        ToolType.TEXT -> {
+            val w = r * 0.16f
+            drawLine(ink, Offset(c.x - r * 0.7f, c.y - r * 0.7f), Offset(c.x + r * 0.7f, c.y - r * 0.7f), w, StrokeCap.Round)
+            drawLine(ink, Offset(c.x, c.y - r * 0.7f), Offset(c.x, c.y + r * 0.8f), w, StrokeCap.Round)
         }
         ToolType.PAN -> {
             val w = r * 0.14f
@@ -242,8 +266,29 @@ fun DrawScope.drawBrushSample(b: BrushType, c: Offset, r: Float, color: Color) {
         BrushType.WIRE -> r * 0.05f
         BrushType.MARKER -> r * 0.42f
         BrushType.AIRBRUSH -> r * 0.5f
+        BrushType.SOFT_PENCIL -> r * (0.08f + 0.1f * sin(u * Math.PI).toFloat())
+        BrushType.HARD_PENCIL -> r * 0.07f
+        BrushType.WATERCOLOR -> r * (0.25f + 0.1f * sin(u * Math.PI * 3).toFloat())
+        BrushType.DOTTED -> r * 0.09f
+        BrushType.MASK_HARD, BrushType.MASK_SOFT -> r * 0.3f
+        else -> r * 0.18f
     }
-    val alpha = when (b) { BrushType.MARKER -> 0.55f; BrushType.AIRBRUSH -> 0.12f; else -> 1f }
+    val alpha = when (b) {
+        BrushType.MARKER -> 0.55f; BrushType.AIRBRUSH -> 0.12f; BrushType.WATERCOLOR -> 0.4f
+        BrushType.SOFT_PENCIL -> 0.8f; BrushType.HARD_PENCIL -> 0.6f; else -> 1f
+    }
+    if (b == BrushType.DOTTED) {
+        for (i in 0..n step 2) drawCircle(color, widthAt(0f), pts[i])
+        return
+    }
+    if (b.isMask) {
+        // An eraser glyph: a tilted block.
+        val ink = Ink.text
+        val w = r * 0.55f
+        drawLine(ink, Offset(c.x - w, c.y + w * 0.6f), Offset(c.x + w, c.y - w * 0.6f), r * 0.5f, StrokeCap.Round)
+        drawLine(Color.White, Offset(c.x - w * 0.6f, c.y + w * 0.36f), Offset(c.x + w * 0.6f, c.y - w * 0.36f), r * (if (b == BrushType.MASK_SOFT) 0.25f else 0.12f), StrokeCap.Round)
+        return
+    }
     if (b == BrushType.AIRBRUSH) {
         for (k in 0..2) for (i in 0..n step 2) drawCircle(color.copy(alpha = alpha), widthAt(0f) * (1f - k * 0.25f), pts[i])
         return
@@ -343,16 +388,25 @@ fun PropPanel(ctl: EditorController, kind: PropKind, onClose: () -> Unit) {
 // ----------------------------------------------------------------------
 
 @Composable
-fun BrushMenu(ctl: EditorController, slotIndex: Int, onClose: () -> Unit) {
+fun BrushMenu(
+    ctl: EditorController,
+    slotIndex: Int,
+    onClose: () -> Unit,
+    onEditBrush: (CustomBrush?) -> Unit,
+    onImportBrushes: () -> Unit,
+    onExportBrushes: () -> Unit,
+) {
     val slot = ctl.slots[slotIndex]
-    Panel(Modifier.width(260.dp)) {
-        Column(Modifier.padding(vertical = 10.dp).verticalScroll(rememberScrollState())) {
+    ctl.brushesVersion // refresh when brushes change
+    Panel(Modifier.width(280.dp)) {
+        Column(Modifier.heightIn(max = 560.dp).padding(vertical = 10.dp).verticalScroll(rememberScrollState())) {
             Row(Modifier.padding(horizontal = 14.dp), verticalAlignment = Alignment.CenterVertically) {
                 Text("Brushes", fontWeight = FontWeight.SemiBold, color = Ink.text)
                 Spacer(Modifier.weight(1f))
                 GlyphButton(Glyph.CLOSE, onClose, size = 32.dp)
             }
-            BrushType.entries.forEach { b ->
+            SectionLabel("Basic brushes")
+            BrushType.entries.filter { it.isBasic }.forEach { b ->
                 val active = slot.tool == ToolType.BRUSH && slot.brush == b
                 MenuRow(active, { ctl.setSlotBrush(slotIndex, ToolType.BRUSH, b); onClose() }) {
                     Canvas(Modifier.size(44.dp, 26.dp)) { drawBrushSample(b, Offset(size.width / 2, size.height / 2), size.width * 0.42f, Color(ctl.color)) }
@@ -360,19 +414,91 @@ fun BrushMenu(ctl: EditorController, slotIndex: Int, onClose: () -> Unit) {
                     Text(b.label, color = Ink.text)
                 }
             }
-            Text("Tools", color = Ink.muted, fontSize = 12.sp, modifier = Modifier.padding(start = 14.dp, top = 8.dp, bottom = 2.dp))
-            listOf(ToolType.SLICE to "Slice (eraser)", ToolType.SELECT to "Select (lasso)", ToolType.EYEDROPPER to "Color picker", ToolType.PAN to "Pan").forEach { (t, label) ->
-                MenuRow(slot.tool == t, {
-                    if (slot.tool != t) ctlSetTool(ctl, slotIndex, t)
+            SectionLabel("My brushes")
+            BrushLib.user.forEach { cb ->
+                val active = slot.brush == BrushType.STAMP && slot.custom == cb.id
+                MenuRow(active, { ctl.setSlotCustom(slotIndex, cb); onClose() }) {
+                    Canvas(Modifier.size(44.dp, 26.dp)) { drawStampSample(cb, Offset(size.width / 2, size.height / 2), size.width * 0.42f, Color(ctl.color)) }
+                    Spacer(Modifier.width(12.dp))
+                    Text(cb.name, color = Ink.text, modifier = Modifier.weight(1f))
+                    GlyphButton(Glyph.PEN, { onEditBrush(cb) }, size = 30.dp, contentDescription = "Edit brush")
+                }
+            }
+            Row(Modifier.padding(horizontal = 10.dp, vertical = 4.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                Chip("New brush", false) { onEditBrush(null) }
+                Chip("Import", false) { onImportBrushes() }
+                if (BrushLib.user.isNotEmpty()) Chip("Export", false) { onExportBrushes() }
+            }
+            SectionLabel("Brush library")
+            BrushLib.library.forEach { cb ->
+                val active = slot.brush == BrushType.STAMP && slot.custom == cb.id
+                MenuRow(active, { ctl.setSlotCustom(slotIndex, cb); onClose() }) {
+                    Canvas(Modifier.size(44.dp, 26.dp)) { drawStampSample(cb, Offset(size.width / 2, size.height / 2), size.width * 0.42f, Color(ctl.color)) }
+                    Spacer(Modifier.width(12.dp))
+                    Text(cb.name, color = Ink.text, modifier = Modifier.weight(1f))
+                    GlyphButton(Glyph.DUPLICATE, { onEditBrush(cb.copy(id = BrushLib.newId(), name = cb.name + " copy", library = false)) }, size = 30.dp, contentDescription = "Duplicate and edit")
+                }
+            }
+            SectionLabel("Tools")
+            listOf(
+                Triple(ToolType.SLICE, null, "Slice (eraser)"),
+                Triple(ToolType.BRUSH, BrushType.MASK_HARD, "Hard mask"),
+                Triple(ToolType.BRUSH, BrushType.MASK_SOFT, "Soft mask"),
+                Triple(ToolType.NUDGE, null, "Nudge"),
+                Triple(ToolType.SELECT, null, "Select (lasso)"),
+                Triple(ToolType.TEXT, null, "Text"),
+                Triple(ToolType.EYEDROPPER, null, "Color picker"),
+                Triple(ToolType.PAN, null, "Pan"),
+            ).forEach { (t, b, label) ->
+                val active = if (b != null) slot.tool == ToolType.BRUSH && slot.brush == b else slot.tool == t
+                MenuRow(active, {
+                    if (b != null) ctl.setSlotBrush(slotIndex, ToolType.BRUSH, b) else if (slot.tool != t) ctlSetTool(ctl, slotIndex, t)
                     onClose()
                 }) {
-                    Canvas(Modifier.size(44.dp, 26.dp)) { drawSlotGlyph(ToolSlot.tool(t), Offset(size.width / 2, size.height / 2), size.height * 0.4f, Ink.text) }
+                    Canvas(Modifier.size(44.dp, 26.dp)) {
+                        if (b != null) drawBrushSample(b, Offset(size.width / 2, size.height / 2), size.width * 0.42f, Color(ctl.color))
+                        else drawSlotGlyph(ToolSlot.tool(t), Offset(size.width / 2, size.height / 2), size.height * 0.4f, Ink.text)
+                    }
                     Spacer(Modifier.width(12.dp))
                     Text(label, color = Ink.text)
                 }
             }
+            if (slot.tool == ToolType.BRUSH && slot.brush.isMask) {
+                SectionLabel("Quick clear")
+                Row(Modifier.padding(horizontal = 10.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Chip("Active layer", false) { ctl.quickClear(EditorController.ClearWhat.LAYER); onClose() }
+                    Chip("All strokes", false) { ctl.quickClear(EditorController.ClearWhat.STROKES); onClose() }
+                }
+                Row(Modifier.padding(horizontal = 10.dp, vertical = 6.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Chip("Text", false) { ctl.quickClear(EditorController.ClearWhat.TEXT); onClose() }
+                    Chip("Images", false) { ctl.quickClear(EditorController.ClearWhat.IMAGES); onClose() }
+                    Chip("Measurements", false) { ctl.quickClear(EditorController.ClearWhat.MEASUREMENTS); onClose() }
+                }
+            }
         }
     }
+}
+
+@Composable
+private fun SectionLabel(text: String) {
+    Text(text, color = Ink.muted, fontSize = 12.sp, modifier = Modifier.padding(start = 14.dp, top = 10.dp, bottom = 2.dp))
+}
+
+/** A short wave drawn with a stamp brush. */
+fun DrawScope.drawStampSample(b: CustomBrush, c: Offset, r: Float, color: Color) {
+    val n = 30
+    val pts = FloatArray((n + 1) * Stroke.STRIDE)
+    for (i in 0..n) {
+        val u = i / n.toFloat()
+        pts[i * Stroke.STRIDE] = c.x - r + 2 * r * u
+        pts[i * Stroke.STRIDE + 1] = c.y + sin(u * Math.PI * 2).toFloat() * r * 0.4f
+        pts[i * Stroke.STRIDE + 2] = 0.25f + 0.75f * sin(u * Math.PI).toFloat()
+        pts[i * Stroke.STRIDE + 3] = i * 16f
+    }
+    val size = r * 0.32f
+    val s = Stroke(7, BrushType.STAMP, size, color.toArgb(), b.defaultOpacity, 0f, 0, pts, customBrush = b.id)
+    val pr = Geometry.process(s)
+    drawIntoCanvas { cv -> Renderer.stampInto(cv.nativeCanvas, s, pr, pr.bounds) }
 }
 
 private fun ctlSetTool(ctl: EditorController, i: Int, t: ToolType) = ctl.setSlotTool(i, t)

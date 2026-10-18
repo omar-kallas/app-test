@@ -121,6 +121,11 @@ fun EditorScreen(ctl: EditorController, repo: Repository, onExit: () -> Unit) {
     var renameLayer by remember { mutableStateOf<Layer?>(null) }
     var showPaper by remember { mutableStateOf(false) }
     var showExport by remember { mutableStateOf(false) }
+    var objectsOpen by remember { mutableStateOf(ctl.prefs.objectsOpen) }
+    var editingBrush by remember { mutableStateOf<com.omarkallas.inkfield.engine.CustomBrush?>(null) }
+    var showBrushEditor by remember { mutableStateOf(false) }
+    var newPackDialog by remember { mutableStateOf(false) }
+    var addToPack by remember { mutableStateOf<com.omarkallas.inkfield.engine.ObjPack?>(null) }
     var showSettings by remember { mutableStateOf(false) }
     var showHelp by remember { mutableStateOf(false) }
     var precisionOpen by remember { mutableStateOf(ctl.prefs.precisionOpen) }
@@ -150,6 +155,8 @@ fun EditorScreen(ctl: EditorController, repo: Repository, onExit: () -> Unit) {
                 v.invalidate()
             },
         )
+        val importers = rememberImporters(ctl, viewRef)
+
         // Reset-view requests from the status bar.
         LaunchedEffect(ctl.resetViewRequest) {
             if (ctl.resetViewRequest > 0) viewRef.value?.resetView()
@@ -169,6 +176,9 @@ fun EditorScreen(ctl: EditorController, repo: Repository, onExit: () -> Unit) {
             onExport = { showExport = true },
             onSettings = { showSettings = true },
             onHelp = { showHelp = true },
+            objectsOpen = objectsOpen,
+            onToggleObjects = { objectsOpen = !objectsOpen; ctl.prefs.objectsOpen = objectsOpen },
+            importers = importers,
             modifier = Modifier.align(Alignment.TopCenter).statusBarsPadding(),
         )
 
@@ -208,6 +218,28 @@ fun EditorScreen(ctl: EditorController, repo: Repository, onExit: () -> Unit) {
             }
         }
 
+        if (objectsOpen) {
+            ObjectsPanel(
+                ctl,
+                onPlace = { pack, obj ->
+                    val c = viewRef.value?.viewCenterCanvas() ?: floatArrayOf(0f, 0f, 100f)
+                    val slot = ctl.slot
+                    val style = com.omarkallas.inkfield.model.Stroke(
+                        0, if (slot.tool == com.omarkallas.inkfield.model.ToolType.BRUSH) slot.brush else com.omarkallas.inkfield.model.BrushType.FIXED,
+                        if (slot.tool == com.omarkallas.inkfield.model.ToolType.BRUSH) slot.size else 2f, ctl.color, slot.opacity, 0f, 0, FloatArray(0),
+                        customBrush = slot.custom,
+                    )
+                    ctl.addGroup(com.omarkallas.inkfield.engine.ObjectLibrary.place(pack, obj, c[0], c[1], c[2] * 1.4f, style, ctl.drawing.precision.measure.scale))
+                },
+                onNewPack = { newPackDialog = true },
+                onAddSelection = { p -> addToPack = p },
+                onExportPack = { p -> importers.exportPack(p) },
+                onImportPack = { importers.importPack() },
+                onClose = { objectsOpen = false; ctl.prefs.objectsOpen = false },
+                modifier = Modifier.align(Alignment.TopEnd).statusBarsPadding().padding(top = 64.dp, end = if (layersOpen) 244.dp else 12.dp),
+            )
+        }
+
         if (layersOpen) {
             LayersPanel(
                 ctl, onRename = { renameLayer = it }, onCollapse = { layersOpen = false; ctl.prefs.layersOpen = false },
@@ -227,7 +259,7 @@ fun EditorScreen(ctl: EditorController, repo: Repository, onExit: () -> Unit) {
         }
 
         if (ctl.selection.isNotEmpty()) {
-            SelectionBar(ctl, Modifier.align(Alignment.BottomCenter).navigationBarsPadding().padding(bottom = 16.dp))
+            SelectionBar(ctl, importers, Modifier.align(Alignment.BottomCenter).navigationBarsPadding().padding(bottom = 16.dp))
         }
 
         // ---- tool wheel ----
@@ -240,6 +272,20 @@ fun EditorScreen(ctl: EditorController, repo: Repository, onExit: () -> Unit) {
             onDragEnd = { ctl.prefs.wheelX = wx; ctl.prefs.wheelY = wy },
             modifier = Modifier.offset { IntOffset(wx.roundToInt(), wy.roundToInt()) },
         )
+
+        if (ctl.paletteStrip) {
+            val stripH = with(density) { 40.dp.toPx() }
+            val below = wy + wheelH + stripH + margin < maxH
+            PaletteStrip(
+                ctl,
+                Modifier.offset {
+                    IntOffset(
+                        (wx + with(density) { 40.dp.toPx() }).roundToInt(),
+                        (if (below) wy + wheelH + margin * 0.5f else wy - stripH - margin * 0.5f).roundToInt(),
+                    )
+                },
+            )
+        }
 
         // ---- popups anchored to the wheel ----
         if (overlay == Overlay.SWATCHES) {
@@ -278,8 +324,16 @@ fun EditorScreen(ctl: EditorController, repo: Repository, onExit: () -> Unit) {
                         onClose = { overlay = Overlay.NONE },
                         onSwatches = { overlay = Overlay.SWATCHES },
                         onEyedropper = { overlay = Overlay.NONE; ctl.eyedropperArmed = true },
+                        onExportPalettes = { importers.exportPalettes() },
+                        onImportPalettes = { importers.importPalettes() },
                     )
-                    Overlay.BRUSHES -> BrushMenu(ctl, brushSlot) { overlay = Overlay.NONE }
+                    Overlay.BRUSHES -> BrushMenu(
+                        ctl, brushSlot,
+                        onClose = { overlay = Overlay.NONE },
+                        onEditBrush = { b -> editingBrush = b; showBrushEditor = true; overlay = Overlay.NONE },
+                        onImportBrushes = { importers.importBrushes() },
+                        onExportBrushes = { importers.exportBrushes() },
+                    )
                     Overlay.SWATCHES, Overlay.NONE -> {}
                 }
             }
@@ -294,6 +348,24 @@ fun EditorScreen(ctl: EditorController, repo: Repository, onExit: () -> Unit) {
         TextDialog("Rename layer", l.name, onDismiss = { renameLayer = null }) { ctl.renameLayer(l.id, it) }
     }
     if (showPaper) PaperDialog(ctl) { showPaper = false }
+    if (showBrushEditor) BrushEditorDialog(ctl, editingBrush) { showBrushEditor = false; editingBrush = null }
+    if (newPackDialog) TextDialog("New object pack", "My pack", onDismiss = { newPackDialog = false }) {
+        com.omarkallas.inkfield.engine.ObjectLibrary.newPack(it)
+        ctl.refreshBrushes()
+    }
+    addToPack?.let { pack ->
+        TextDialog("Name this object", "Object", onDismiss = { addToPack = null }) { name ->
+            com.omarkallas.inkfield.engine.ObjectLibrary.addObject(pack.id, name, ctl.selectedStrokes())
+            ctl.refreshBrushes()
+        }
+    }
+    ctl.textRequest?.let { p ->
+        MultilineTextDialog("Add text", "", onDismiss = { ctl.textRequest = null }) { t -> ctl.addText(t, p.x, p.y) }
+    }
+    ctl.textEditId?.let { id ->
+        val current = ctl.drawing.strokes.firstOrNull { it.id == id }?.text ?: ""
+        MultilineTextDialog("Edit text", current, onDismiss = { ctl.textEditId = null }) { t -> ctl.editText(id, t) }
+    }
     if (showMeasure) MeasurementDialog(ctl) { showMeasure = false }
     if (showScaleFrom) ScaleFromSelectionDialog(ctl) { showScaleFrom = false }
     if (showSettings) SettingsDialog(ctl) { showSettings = false }
@@ -315,8 +387,12 @@ private fun StatusBar(
     onExport: () -> Unit,
     onSettings: () -> Unit,
     onHelp: () -> Unit,
+    objectsOpen: Boolean,
+    onToggleObjects: () -> Unit,
+    importers: Importers,
     modifier: Modifier = Modifier,
 ) {
+    var importMenu by remember { mutableStateOf(false) }
     Panel(modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp)) {
         Row(Modifier.height(48.dp).padding(horizontal = 6.dp), verticalAlignment = Alignment.CenterVertically) {
             GlyphButton(Glyph.GALLERY, onGallery, contentDescription = "Gallery")
@@ -356,6 +432,16 @@ private fun StatusBar(
             }
             GlyphButton(Glyph.RULER, onTogglePrecision, active = precisionOpen, contentDescription = "Precision")
             GlyphButton(Glyph.LAYERS, onToggleLayers, active = layersOpen, contentDescription = "Layers")
+            GlyphButton(Glyph.OBJECTS, onToggleObjects, active = objectsOpen, contentDescription = "Objects")
+            Box {
+                GlyphButton(Glyph.IMPORT, { importMenu = true }, contentDescription = "Import")
+                androidx.compose.material3.DropdownMenu(expanded = importMenu, onDismissRequest = { importMenu = false }) {
+                    androidx.compose.material3.DropdownMenuItem(text = { Text("Photo") }, onClick = { importMenu = false; importers.pickPhoto() })
+                    androidx.compose.material3.DropdownMenuItem(text = { Text("Take a picture") }, onClick = { importMenu = false; importers.takePhoto() })
+                    androidx.compose.material3.DropdownMenuItem(text = { Text("Image or PDF file") }, onClick = { importMenu = false; importers.openFile() })
+                    androidx.compose.material3.DropdownMenuItem(text = { Text("Paste") }, onClick = { importMenu = false; importers.paste() })
+                }
+            }
             GlyphButton(Glyph.PAPER, onPaper, contentDescription = "Paper")
             GlyphButton(Glyph.EXPORT, onExport, contentDescription = "Export")
             GlyphButton(Glyph.SETTINGS, onSettings, contentDescription = "Settings")
@@ -365,14 +451,20 @@ private fun StatusBar(
 }
 
 @Composable
-private fun SelectionBar(ctl: EditorController, modifier: Modifier) {
+private fun SelectionBar(ctl: EditorController, importers: Importers, modifier: Modifier) {
+    var more by remember { mutableStateOf(false) }
+    val sel = ctl.selectedStrokes()
+    val singleText = sel.singleOrNull()?.takeIf { it.brush == com.omarkallas.inkfield.model.BrushType.TEXT }
     Panel(modifier) {
         Row(Modifier.padding(horizontal = 8.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
             Text("${ctl.selection.size} selected", color = Ink.muted, fontSize = 13.sp, modifier = Modifier.padding(horizontal = 8.dp))
             Chip(if (ctl.partialLasso) "Partial" else "Enclosed", ctl.partialLasso) { ctl.partialLasso = !ctl.partialLasso }
             Spacer(Modifier.width(6.dp))
             Chip(if (ctl.selectionScaleWidths) "Scale" else "Stretch", false) { ctl.selectionScaleWidths = !ctl.selectionScaleWidths }
+            Spacer(Modifier.width(6.dp))
+            Chip("Distort", ctl.distortMode) { ctl.distortMode = !ctl.distortMode }
             Spacer(Modifier.width(4.dp))
+            if (singleText != null) GlyphButton(Glyph.TEXT, { ctl.textEditId = singleText.id }, contentDescription = "Edit text")
             GlyphButton(Glyph.DUPLICATE, { ctl.duplicateSelection() }, contentDescription = "Duplicate")
             GlyphButton(Glyph.FLIP_H, {
                 ctl.selectionBounds()?.let { b -> ctl.flipSelection(true, b.centerX(), b.centerY()) }
@@ -381,9 +473,40 @@ private fun SelectionBar(ctl: EditorController, modifier: Modifier) {
                 ctl.selectionBounds()?.let { b -> ctl.flipSelection(false, b.centerX(), b.centerY()) }
             }, contentDescription = "Flip vertically")
             GlyphButton(Glyph.TRASH, { ctl.deleteSelection() }, tint = Ink.danger, contentDescription = "Delete")
-            GlyphButton(Glyph.CHECK, { ctl.clearSelection() }, contentDescription = "Done")
+            Box {
+                GlyphButton(Glyph.MORE, { more = true }, contentDescription = "More")
+                androidx.compose.material3.DropdownMenu(expanded = more, onDismissRequest = { more = false }) {
+                    if (ctl.selectionIsGroup) androidx.compose.material3.DropdownMenuItem(text = { Text("Ungroup") }, onClick = { more = false; ctl.ungroupSelection() })
+                    else if (ctl.selection.size > 1) androidx.compose.material3.DropdownMenuItem(text = { Text("Group") }, onClick = { more = false; ctl.groupSelection() })
+                    androidx.compose.material3.DropdownMenuItem(text = { Text("Lock") }, onClick = { more = false; ctl.lockSelection() })
+                    androidx.compose.material3.DropdownMenuItem(text = { Text("Copy as image") }, onClick = { more = false; importers.copySelection() })
+                    androidx.compose.material3.DropdownMenuItem(
+                        text = { Text((if (ctl.includeLocked) "✓ " else "") + "Selecting includes locked items") },
+                        onClick = { ctl.includeLocked = !ctl.includeLocked },
+                    )
+                    androidx.compose.material3.DropdownMenuItem(
+                        text = { Text((if (ctl.activeLayerOnly) "✓ " else "") + "Select on the active layer only") },
+                        onClick = { ctl.activeLayerOnly = !ctl.activeLayerOnly },
+                    )
+                    androidx.compose.material3.DropdownMenuItem(text = { Text("Unlock everything") }, onClick = { more = false; ctl.unlockAll() })
+                }
+            }
+            GlyphButton(Glyph.CHECK, { ctl.clearSelection(); ctl.distortMode = false }, contentDescription = "Done")
         }
     }
+}
+
+/** Text entry that allows several lines. */
+@Composable
+fun MultilineTextDialog(title: String, initial: String, onDismiss: () -> Unit, onDone: (String) -> Unit) {
+    var text by remember { mutableStateOf(initial) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(title) },
+        text = { OutlinedTextField(text, { text = it }, minLines = 2, maxLines = 8) },
+        confirmButton = { TextButton(onClick = { onDone(text); onDismiss() }) { Text("Done") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
 }
 
 @Composable
@@ -519,6 +642,12 @@ private fun HelpDialog(onDismiss: () -> Unit) {
         "Shape guides" to "A gray template that anything you draw follows: line, arc, angle, ellipse or rectangle. Drag its handles; double-tap its cross for a perfect version.",
         "Shapes" to "Draw a rough line, arc, triangle, rectangle or circle and hold the pen still: it turns into a clean shape. Keep moving to scale and rotate it.",
         "Measure" to "Strokes drawn with Measure on show their length. Set units and a drawing scale (like 1:100), or set the scale from a line of known length. With a selection, tap its size in the top bar to type exact dimensions.",
+        "Brushes" to "Tap the active wheel slot for all brushes: pencils, watercolor, dotted, fill, the brush library and your own brushes. 'New brush' opens the brush editor; brushes can be exported and imported as files.",
+        "Masks and Nudge" to "Hard and Soft Mask erase without destroying: they hide what's beneath them on their layer and stay editable. Nudge pushes strokes around like string. A mask slot's menu has Quick clear.",
+        "Text and images" to "Put Text on a wheel slot and tap the canvas to type. The import button adds photos, camera pictures, image or PDF files, or whatever is on the clipboard. Text and images move, scale, rotate and distort like strokes.",
+        "Objects" to "The objects button opens the library: shapes, arrows, annotation marks, and people, vehicles and furniture at 1:100. Tap one to place it. Make your own pack and add a selection to it from the pack's menu.",
+        "Groups, locks, distort" to "With a selection, the ⋯ button groups, locks or copies it as an image. Turn on Distort to drag each corner on its own.",
+        "Palettes" to "The color panel holds several palettes, harmony suggestions and import/export. The strip under the wheel applies a color with a tap; hold and slide along it to mix neighboring colors.",
         "Saving" to "Drawings save automatically. Deleted drawings stay in Recently Deleted for 30 days.",
     )
     AlertDialog(

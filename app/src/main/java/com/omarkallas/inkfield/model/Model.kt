@@ -15,10 +15,32 @@ enum class BrushType(val label: String, val family: String, val defaultSize: Flo
     FIXED("Fixed Width", "Pens", 3f),
     WIRE("Wire", "Wire", 1.5f),
     MARKER("Marker", "Marker", 16f),
-    AIRBRUSH("Airbrush", "Airbrush", 40f);
+    AIRBRUSH("Airbrush", "Airbrush", 40f),
+    SOFT_PENCIL("Soft Pencil", "Pencils", 5f),
+    HARD_PENCIL("Hard Pencil", "Pencils", 3f),
+    WATERCOLOR("Watercolor", "Watercolor", 24f),
+    DOTTED("Dotted", "Pens", 3f),
+    FILL("Fill", "Fill", 2f),
+    MASK_HARD("Hard Mask", "", 20f),
+    MASK_SOFT("Soft Mask", "", 30f),
+    /** A brush from the stamp engine; [Stroke.customBrush] names it. */
+    STAMP("Custom brush", "Brushes", 12f),
+    /** Text label; [Stroke.text] holds the string and pts the frame. */
+    TEXT("Text", "Text", 24f),
+    /** Placed image; [Stroke.asset] names the file and pts the frame. */
+    IMAGE("Image", "Image", 1f);
 
     /** Drawn as a constant-width centerline instead of a variable-width outline. */
     val isCenterline: Boolean get() = this == FIXED || this == WIRE || this == MARKER || this == AIRBRUSH
+
+    /** Non-destructive eraser: subtracts from what lies beneath it on its layer. */
+    val isMask: Boolean get() = this == MASK_HARD || this == MASK_SOFT
+
+    /** Text and images: pts hold a frame (origin, x-axis end, y-axis end) instead of a path. */
+    val isItem: Boolean get() = this == TEXT || this == IMAGE
+
+    /** Basic brushes offered in the brushes menu. */
+    val isBasic: Boolean get() = !isMask && !isItem && this != STAMP
 }
 
 enum class ToolType(val label: String) {
@@ -27,13 +49,16 @@ enum class ToolType(val label: String) {
     SELECT("Select"),
     PAN("Pan"),
     EYEDROPPER("Color picker"),
+    NUDGE("Nudge"),
+    TEXT("Text"),
 }
 
 /**
- * One stroke. [pts] holds the raw input as a flat array, stride [STRIDE]:
+ * One stroke (or item). [pts] holds the raw input as a flat array, stride [STRIDE]:
  * x, y (canvas units), pressure (0..1), time (ms since stroke start).
  * Smoothing, width and texture are applied at render time, so every property
- * stays editable after drawing.
+ * stays editable after drawing. Text and image items store a frame in [pts]:
+ * origin, origin + x-axis, origin + y-axis, so every transform applies to them too.
  */
 @Serializable
 class Stroke(
@@ -47,6 +72,13 @@ class Stroke(
     val pts: FloatArray,
     /** Show this stroke's length (drawn while Measure was on). */
     val measured: Boolean = false,
+    /** Strokes sharing a group id select together. */
+    val groupId: Long? = null,
+    /** Locked strokes are skipped by selection unless the Lock filter includes them. */
+    val locked: Boolean = false,
+    val text: String? = null,
+    val asset: String? = null,
+    val customBrush: String? = null,
 ) {
     val count: Int get() = pts.size / STRIDE
 
@@ -60,7 +92,12 @@ class Stroke(
         layerId: Long = this.layerId,
         pts: FloatArray = this.pts,
         measured: Boolean = this.measured,
-    ) = Stroke(id, brush, size, color, opacity, smoothing, layerId, pts, measured)
+        groupId: Long? = this.groupId,
+        locked: Boolean = this.locked,
+        text: String? = this.text,
+        asset: String? = this.asset,
+        customBrush: String? = this.customBrush,
+    ) = Stroke(id, brush, size, color, opacity, smoothing, layerId, pts, measured, groupId, locked, text, asset, customBrush)
 
     companion object {
         const val STRIDE = 4
