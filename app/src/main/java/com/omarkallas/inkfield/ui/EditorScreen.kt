@@ -50,6 +50,10 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.layout
+import androidx.compose.foundation.focusable
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
@@ -81,15 +85,28 @@ import kotlin.math.roundToInt
 
 private enum class Overlay { NONE, PROP_SIZE, PROP_OPACITY, PROP_SMOOTHING, COLOR, SWATCHES, BRUSHES }
 
-suspend fun saveDrawing(ctl: EditorController, repo: Repository) {
+suspend fun saveDrawing(ctl: EditorController, repo: Repository, mirror: Boolean = false) {
     val d = ctl.drawing
     val thumb = runCatching { Exporter.thumbnail(d, ctl.cache) }.getOrNull()
-    withContext(Dispatchers.IO) { repo.save(d, thumb) }
+    withContext(Dispatchers.IO) {
+        repo.save(d, thumb)
+        // The device-folder copy is written when leaving the drawing, not on every autosave.
+        if (mirror) repo.mirror.write(repo, d)
+    }
     thumb?.recycle()
 }
 
 @Composable
 fun EditorScreen(ctl: EditorController, repo: Repository, onExit: () -> Unit) {
+    // Interface scale (Settings) applies to the chrome; the canvas keeps its own size.
+    val base = LocalDensity.current
+    androidx.compose.runtime.CompositionLocalProvider(
+        LocalDensity provides androidx.compose.ui.unit.Density(base.density * ctl.uiScale, base.fontScale),
+    ) { EditorScreenContent(ctl, repo, onExit) }
+}
+
+@Composable
+private fun EditorScreenContent(ctl: EditorController, repo: Repository, onExit: () -> Unit) {
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
     val density = LocalDensity.current
@@ -104,12 +121,12 @@ fun EditorScreen(ctl: EditorController, repo: Repository, onExit: () -> Unit) {
     val lifecycleOwner = LocalLifecycleOwner.current
     DisposableEffect(lifecycleOwner) {
         val obs = LifecycleEventObserver { _, e ->
-            if (e == Lifecycle.Event.ON_STOP) scope.launch { saveDrawing(ctl, repo) }
+            if (e == Lifecycle.Event.ON_STOP) scope.launch { saveDrawing(ctl, repo, mirror = true) }
         }
         lifecycleOwner.lifecycle.addObserver(obs)
         onDispose { lifecycleOwner.lifecycle.removeObserver(obs) }
     }
-    val exit: () -> Unit = { scope.launch { saveDrawing(ctl, repo); onExit() } }
+    val exit: () -> Unit = { scope.launch { saveDrawing(ctl, repo, mirror = true); onExit() } }
     BackHandler {
         if (ctl.selection.isNotEmpty()) ctl.clearSelection() else exit()
     }
@@ -121,6 +138,8 @@ fun EditorScreen(ctl: EditorController, repo: Repository, onExit: () -> Unit) {
     var renameLayer by remember { mutableStateOf<Layer?>(null) }
     var showPaper by remember { mutableStateOf(false) }
     var showExport by remember { mutableStateOf(false) }
+    var exportScreen by remember { mutableStateOf<android.graphics.RectF?>(null) }
+    var exportScale by remember { mutableFloatStateOf(1f) }
     var objectsOpen by remember { mutableStateOf(ctl.prefs.objectsOpen) }
     var editingBrush by remember { mutableStateOf<com.omarkallas.inkfield.engine.CustomBrush?>(null) }
     var showBrushEditor by remember { mutableStateOf(false) }
@@ -143,6 +162,14 @@ fun EditorScreen(ctl: EditorController, repo: Repository, onExit: () -> Unit) {
         var wheelY by remember { mutableFloatStateOf(if (ctl.prefs.wheelY >= 0f) ctl.prefs.wheelY else maxH - wheelH - margin * 3) }
         val wx = wheelX.coerceIn(0f, (maxW - wheelW).coerceAtLeast(0f))
         val wy = wheelY.coerceIn(0f, (maxH - wheelH).coerceAtLeast(0f))
+        val barMode = ctl.toolbarMode != com.omarkallas.inkfield.prefs.ToolbarMode.WHEEL
+        val barH = with(density) { 58.dp.toPx() }
+        val barTopY = with(density) { 76.dp.toPx() }
+        val barY = if (ctl.toolbarMode == com.omarkallas.inkfield.prefs.ToolbarMode.BAR_TOP) barTopY else maxH - barH - margin * 4
+        // Popups open next to the wheel, or next to the toolbar in bar mode.
+        val ax = if (barMode) margin else wx
+        val ay = if (barMode) barY else wy
+        val ah = if (barMode) barH else wheelH
 
         // ---- canvas ----
         val viewRef = remember { mutableStateOf<DrawingView?>(null) }
@@ -151,7 +178,7 @@ fun EditorScreen(ctl: EditorController, repo: Repository, onExit: () -> Unit) {
             modifier = Modifier.fillMaxSize(),
             update = { v ->
                 // Reading these states re-runs update when they change.
-                ctl.version; ctl.selection; ctl.slot; ctl.color; ctl.gridEditing; ctl.eyedropperArmed
+                ctl.version; ctl.selection; ctl.slot; ctl.color; ctl.gridEditing; ctl.eyedropperArmed; ctl.artboardEditing
                 v.invalidate()
             },
         )
@@ -163,7 +190,7 @@ fun EditorScreen(ctl: EditorController, repo: Repository, onExit: () -> Unit) {
         }
 
         // ---- status bar ----
-        StatusBar(
+        if (!ctl.uiHidden) StatusBar(
             ctl = ctl,
             layersOpen = layersOpen,
             onGallery = exit,
@@ -173,7 +200,11 @@ fun EditorScreen(ctl: EditorController, repo: Repository, onExit: () -> Unit) {
             onTogglePrecision = { precisionOpen = !precisionOpen; ctl.prefs.precisionOpen = precisionOpen; if (!precisionOpen) precisionSection = null },
             onMeasureSelection = { showMeasure = true },
             onPaper = { showPaper = true },
-            onExport = { showExport = true },
+            onExport = {
+                exportScreen = viewRef.value?.visibleCanvasRect()
+                exportScale = viewRef.value?.currentScale() ?: 1f
+                showExport = true
+            },
             onSettings = { showSettings = true },
             onHelp = { showHelp = true },
             objectsOpen = objectsOpen,
@@ -188,7 +219,7 @@ fun EditorScreen(ctl: EditorController, repo: Repository, onExit: () -> Unit) {
                 it.copy(guideOn = true, guideType = t, guide = com.omarkallas.inkfield.engine.Guides.create(t, c[0], c[1], c[2]))
             }
         }
-        if (precisionOpen) {
+        if (precisionOpen && !ctl.uiHidden) {
             PrecisionPanel(
                 ctl, precisionSection, onOpen = { s -> precisionSection = if (precisionSection == s) null else s },
                 onNewGuide = { newGuide(ctl.drawing.precision.guideType) },
@@ -208,6 +239,15 @@ fun EditorScreen(ctl: EditorController, repo: Repository, onExit: () -> Unit) {
                 }
             }
         }
+        if (ctl.artboardEditing) {
+            Panel(Modifier.align(Alignment.TopCenter).statusBarsPadding().padding(top = 72.dp)) {
+                Row(Modifier.padding(start = 14.dp, end = 4.dp, top = 4.dp, bottom = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Text("Drag to move the artboard", color = Ink.text, fontSize = 14.sp)
+                    Spacer(Modifier.width(8.dp))
+                    androidx.compose.material3.TextButton(onClick = { ctl.artboardEditing = false }) { Text("Done") }
+                }
+            }
+        }
         if (ctl.gridEditing) {
             Panel(Modifier.align(Alignment.TopCenter).statusBarsPadding().padding(top = 72.dp)) {
                 Row(Modifier.padding(start = 14.dp, end = 4.dp, top = 4.dp, bottom = 4.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -218,7 +258,7 @@ fun EditorScreen(ctl: EditorController, repo: Repository, onExit: () -> Unit) {
             }
         }
 
-        if (objectsOpen) {
+        if (objectsOpen && !ctl.uiHidden) {
             ObjectsPanel(
                 ctl,
                 onPlace = { pack, obj ->
@@ -240,7 +280,7 @@ fun EditorScreen(ctl: EditorController, repo: Repository, onExit: () -> Unit) {
             )
         }
 
-        if (layersOpen) {
+        if (layersOpen && !ctl.uiHidden) {
             LayersPanel(
                 ctl, onRename = { renameLayer = it }, onCollapse = { layersOpen = false; ctl.prefs.layersOpen = false },
                 modifier = Modifier.align(Alignment.TopEnd).statusBarsPadding().padding(top = 64.dp, end = 12.dp),
@@ -258,12 +298,42 @@ fun EditorScreen(ctl: EditorController, repo: Repository, onExit: () -> Unit) {
             }
         }
 
-        if (ctl.selection.isNotEmpty()) {
-            SelectionBar(ctl, importers, Modifier.align(Alignment.BottomCenter).navigationBarsPadding().padding(bottom = 16.dp))
+        if (ctl.selection.isNotEmpty() && !ctl.uiHidden) {
+            val lift = if (ctl.toolbarMode == com.omarkallas.inkfield.prefs.ToolbarMode.BAR_BOTTOM) 76.dp else 16.dp
+            SelectionBar(ctl, importers, Modifier.align(Alignment.BottomCenter).navigationBarsPadding().padding(bottom = lift))
         }
 
-        // ---- tool wheel ----
-        ToolWheel(
+        // ---- gesture / shortcut requests ----
+        LaunchedEffect(ctl.uiRequest) {
+            when (ctl.uiRequest) {
+                com.omarkallas.inkfield.prefs.GestureAction.SHOW_LAYERS -> { layersOpen = true; ctl.prefs.layersOpen = true }
+                com.omarkallas.inkfield.prefs.GestureAction.SHOW_COLORS -> overlay = if (ctl.prefs.colorMode == "swatch") Overlay.SWATCHES else Overlay.COLOR
+                com.omarkallas.inkfield.prefs.GestureAction.TOOL_SETUP -> { brushSlot = ctl.activeSlot; overlay = Overlay.BRUSHES }
+                com.omarkallas.inkfield.prefs.GestureAction.SHOW_OBJECTS -> { objectsOpen = true; ctl.prefs.objectsOpen = true }
+                else -> {}
+            }
+            if (ctl.uiRequest != null) ctl.uiRequest = null
+        }
+        LaunchedEffect(ctl.zoomRequest) {
+            ctl.zoomRequest?.let { viewRef.value?.zoomBy(it); ctl.zoomRequest = null }
+        }
+
+        if (ctl.uiHidden) {
+            // Everything but the canvas is hidden; this small button brings it back.
+            Panel(Modifier.align(Alignment.TopStart).statusBarsPadding().padding(12.dp)) {
+                GlyphButton(Glyph.EYE, { ctl.uiHidden = false }, contentDescription = "Show interface")
+            }
+        }
+
+        // ---- tool wheel or toolbar ----
+        if (!ctl.uiHidden && barMode) ToolBar(
+            ctl = ctl,
+            onOpenProp = { k -> overlay = when (k) { PropKind.SIZE -> Overlay.PROP_SIZE; PropKind.OPACITY -> Overlay.PROP_OPACITY; PropKind.SMOOTHING -> Overlay.PROP_SMOOTHING } },
+            onOpenColor = { overlay = if (ctl.prefs.colorMode == "swatch") Overlay.SWATCHES else Overlay.COLOR },
+            onOpenBrushMenu = { brushSlot = it; overlay = Overlay.BRUSHES },
+            modifier = Modifier.offset { IntOffset(margin.roundToInt(), barY.roundToInt()) },
+        )
+        if (!ctl.uiHidden && !barMode) ToolWheel(
             ctl = ctl,
             onOpenProp = { k -> overlay = when (k) { PropKind.SIZE -> Overlay.PROP_SIZE; PropKind.OPACITY -> Overlay.PROP_OPACITY; PropKind.SMOOTHING -> Overlay.PROP_SMOOTHING } },
             onOpenColor = { overlay = if (ctl.prefs.colorMode == "swatch") Overlay.SWATCHES else Overlay.COLOR },
@@ -273,15 +343,15 @@ fun EditorScreen(ctl: EditorController, repo: Repository, onExit: () -> Unit) {
             modifier = Modifier.offset { IntOffset(wx.roundToInt(), wy.roundToInt()) },
         )
 
-        if (ctl.paletteStrip) {
+        if (ctl.paletteStrip && !ctl.uiHidden) {
             val stripH = with(density) { 40.dp.toPx() }
-            val below = wy + wheelH + stripH + margin < maxH
+            val below = ay + ah + stripH + margin < maxH && !(barMode && ctl.toolbarMode == com.omarkallas.inkfield.prefs.ToolbarMode.BAR_BOTTOM)
             PaletteStrip(
                 ctl,
                 Modifier.offset {
                     IntOffset(
-                        (wx + with(density) { 40.dp.toPx() }).roundToInt(),
-                        (if (below) wy + wheelH + margin * 0.5f else wy - stripH - margin * 0.5f).roundToInt(),
+                        (ax + with(density) { 40.dp.toPx() }).roundToInt(),
+                        (if (below) ay + ah + margin * 0.5f else ay - stripH - margin * 0.5f).roundToInt(),
                     )
                 },
             )
@@ -290,8 +360,8 @@ fun EditorScreen(ctl: EditorController, repo: Repository, onExit: () -> Unit) {
         // ---- popups anchored to the wheel ----
         if (overlay == Overlay.SWATCHES) {
             // Wheel center: the undo button and its spacer sit left of the wheel.
-            val cx = wx + with(density) { (50.dp + WHEEL_SIZE / 2).toPx() }
-            val cy = wy + wheelH / 2f
+            val cx = if (barMode) ax + with(density) { 160.dp.toPx() } else wx + with(density) { (50.dp + WHEEL_SIZE / 2).toPx() }
+            val cy = ay + ah / 2f
             SwatchWheel(
                 ctl, androidx.compose.ui.geometry.Offset(cx, cy),
                 onClose = { overlay = Overlay.NONE },
@@ -301,15 +371,15 @@ fun EditorScreen(ctl: EditorController, repo: Repository, onExit: () -> Unit) {
         } else if (overlay != Overlay.NONE) {
             Box(Modifier.fillMaxSize().pointerInput(Unit) { detectTapGestures { overlay = Overlay.NONE } })
             val gap = with(density) { 10.dp.toPx() }
-            val above = wy + wheelH / 2 > maxH / 2
+            val above = ay + ah / 2 > maxH / 2
             Box(
                 Modifier
                     .fillMaxSize()
                     .layout { m, c ->
                         val p = m.measure(c.copy(minWidth = 0, minHeight = 0))
                         layout(c.maxWidth, c.maxHeight) {
-                            val x = wx.roundToInt().coerceIn(0, (c.maxWidth - p.width).coerceAtLeast(0))
-                            val y = (if (above) wy - p.height - gap else wy + wheelH + gap).roundToInt()
+                            val x = ax.roundToInt().coerceIn(0, (c.maxWidth - p.width).coerceAtLeast(0))
+                            val y = (if (above) ay - p.height - gap else ay + ah + gap).roundToInt()
                                 .coerceIn(0, (c.maxHeight - p.height).coerceAtLeast(0))
                             p.place(x, y)
                         }
@@ -370,7 +440,7 @@ fun EditorScreen(ctl: EditorController, repo: Repository, onExit: () -> Unit) {
     if (showScaleFrom) ScaleFromSelectionDialog(ctl) { showScaleFrom = false }
     if (showSettings) SettingsDialog(ctl) { showSettings = false }
     if (showHelp) HelpDialog { showHelp = false }
-    if (showExport) ExportDialog(ctl) { showExport = false }
+    if (showExport) ExportDialog(ctl, repo, exportScreen, exportScale) { showExport = false }
 }
 
 @Composable
@@ -521,13 +591,14 @@ fun TextDialog(title: String, initial: String, onDismiss: () -> Unit, onDone: (S
     )
 }
 
+@OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
 @Composable
 private fun PaperDialog(ctl: EditorController, onDismiss: () -> Unit) {
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Paper") },
+        title = { Text("Paper and artboard") },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 Paper.entries.forEach { p ->
                     Row(
                         Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp)).clickable { ctl.setBackground(p.color) }.padding(6.dp),
@@ -557,6 +628,8 @@ private fun PaperDialog(ctl: EditorController, onDismiss: () -> Unit) {
                     Spacer(Modifier.width(12.dp))
                     Text("Make this the default for new drawings", color = Ink.muted, fontSize = 13.sp)
                 }
+                Spacer(Modifier.height(8.dp))
+                ArtboardSection(ctl, onDismiss)
             }
         },
         confirmButton = { TextButton(onClick = onDismiss) { Text("Done") } },
@@ -609,6 +682,54 @@ private fun SettingsDialog(ctl: EditorController, onDismiss: () -> Unit) {
                     onValueChangeFinished = { prefs.holdToSelectMs = hold.roundToInt() },
                     colors = SliderDefaults.colors(thumbColor = Ink.text, activeTrackColor = Ink.text),
                 )
+                Spacer(Modifier.height(10.dp))
+                Text("Gestures", fontWeight = FontWeight.SemiBold)
+                ActionPicker("Two-finger tap", prefs.tap2) { prefs.tap2 = it }
+                ActionPicker("Three-finger tap", prefs.tap3) { prefs.tap3 = it }
+                ActionPicker("Four-finger tap", prefs.tap4) { prefs.tap4 = it }
+                ActionPicker("Stylus side button", prefs.stylusButton) { prefs.stylusButton = it }
+                var holdSel by remember { mutableStateOf(prefs.holdSelects) }
+                var zoomOn by remember { mutableStateOf(prefs.zoomEnabled) }
+                var rotOn by remember { mutableStateOf(prefs.rotateEnabled) }
+                var zoomSnap by remember { mutableStateOf(prefs.zoomSnap) }
+                var rotSnap by remember { mutableStateOf(prefs.rotateSnap) }
+                SettingSwitch("Hold still to select", holdSel) { holdSel = it; prefs.holdSelects = it }
+                SettingSwitch("Pinch to zoom", zoomOn) { zoomOn = it; prefs.zoomEnabled = it }
+                SettingSwitch("Twist to rotate", rotOn) { rotOn = it; prefs.rotateEnabled = it }
+                SettingSwitch("Zoom snaps to 100%", zoomSnap) { zoomSnap = it; prefs.zoomSnap = it }
+                SettingSwitch("Rotation snaps to right angles", rotSnap) { rotSnap = it; prefs.rotateSnap = it }
+
+                Spacer(Modifier.height(10.dp))
+                Text("Interface", fontWeight = FontWeight.SemiBold)
+                com.omarkallas.inkfield.prefs.ToolbarMode.entries.forEach { m ->
+                    Row(
+                        Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp)).clickable { ctl.toolbarMode = m; prefs.toolbarMode = m }.padding(vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Box(
+                            Modifier.size(18.dp).clip(CircleShape)
+                                .border(2.dp, if (ctl.toolbarMode == m) Ink.accent else Ink.outline, CircleShape)
+                                .padding(4.dp).clip(CircleShape).background(if (ctl.toolbarMode == m) Ink.accent else Color.Transparent),
+                        )
+                        Spacer(Modifier.width(10.dp))
+                        Text(m.label, fontSize = 14.sp)
+                    }
+                }
+                var scale by remember { mutableFloatStateOf(ctl.uiScale) }
+                Text("Interface size ${(scale * 100).roundToInt()}%", fontSize = 14.sp)
+                Slider(
+                    value = scale, onValueChange = { scale = it }, valueRange = 0.8f..1.4f, steps = 5,
+                    onValueChangeFinished = { ctl.uiScale = scale; prefs.uiScale = scale },
+                    colors = SliderDefaults.colors(thumbColor = Ink.text, activeTrackColor = Ink.text),
+                )
+                SettingSwitch("Palette strip under the tools", ctl.paletteStrip) { ctl.togglePaletteStrip() }
+
+                Spacer(Modifier.height(10.dp))
+                Text("Keyboard", fontWeight = FontWeight.SemiBold)
+                var shortcutsOn by remember { mutableStateOf(prefs.shortcutsEnabled) }
+                SettingSwitch("Keyboard shortcuts", shortcutsOn) { shortcutsOn = it; prefs.shortcutsEnabled = it }
+                if (shortcutsOn) ShortcutEditor(prefs)
+
                 Spacer(Modifier.height(8.dp))
                 Text("Inkfield works fully offline. Nothing leaves your device unless you export it.", color = Ink.muted, fontSize = 12.sp)
             }
@@ -648,6 +769,10 @@ private fun HelpDialog(onDismiss: () -> Unit) {
         "Objects" to "The objects button opens the library: shapes, arrows, annotation marks, and people, vehicles and furniture at 1:100. Tap one to place it. Make your own pack and add a selection to it from the pack's menu.",
         "Groups, locks, distort" to "With a selection, the ⋯ button groups, locks or copies it as an image. Turn on Distort to drag each corner on its own.",
         "Palettes" to "The color panel holds several palettes, harmony suggestions and import/export. The strip under the wheel applies a color with a tap; hold and slide along it to mix neighboring colors.",
+        "Export" to "PNG, JPG, SVG, vector or flattened PDF, layered PSD, DXF for CAD, or the native .inkfield file. Choose the region: the whole drawing, the artboard, the selection or the screen.",
+        "Artboard" to "In Paper and artboard, pick a paper or screen size to get a fixed frame; it can be moved, rotated, and used as an export region. Grids can be limited to it.",
+        "Gallery" to "Make folders (with notes), sort and group drawings, move them between folders, and back up everything or a single folder as a zip. Backups and .inkfield files import on any device. You can also keep a copy of every drawing in a device folder.",
+        "Gestures and keys" to "Settings lets you choose what two-, three- and four-finger taps and the stylus button do, turn zoom/rotation and their snapping on or off, switch to a toolbar instead of the wheel, change the interface size, and edit keyboard shortcuts (hold Space to pan).",
         "Saving" to "Drawings save automatically. Deleted drawings stay in Recently Deleted for 30 days.",
     )
     AlertDialog(
@@ -665,78 +790,128 @@ private fun HelpDialog(onDismiss: () -> Unit) {
     )
 }
 
+@OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
 @Composable
-private fun ExportDialog(ctl: EditorController, onDismiss: () -> Unit) {
+private fun ExportDialog(ctl: EditorController, repo: Repository, screen: android.graphics.RectF?, viewScale: Float, onDismiss: () -> Unit) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    var format by remember { mutableStateOf(ExportFormat.PNG) }
-    var scale by remember { mutableFloatStateOf(2f) }
-    var background by remember { mutableStateOf(true) }
+    val d = ctl.drawing
     val hasSelection = ctl.selection.isNotEmpty()
-    var selectionOnly by remember { mutableStateOf(hasSelection) }
-    val opts = ExportOptions(format, scale, background, if (selectionOnly && hasSelection) ctl.selection else null)
-    val fileName = ctl.drawing.name.replace(Regex("[^A-Za-z0-9 _-]"), "").trim().ifEmpty { "Inkfield" } + "." + format.ext
+    var format by remember { mutableStateOf(ExportFormat.PNG) }
+    var region by remember {
+        mutableStateOf(
+            when {
+                hasSelection -> com.omarkallas.inkfield.engine.ExportRegion.SELECTION
+                d.artboard != null -> com.omarkallas.inkfield.engine.ExportRegion.ARTBOARD
+                else -> com.omarkallas.inkfield.engine.ExportRegion.DRAWING
+            },
+        )
+    }
+    var ppi by remember { mutableFloatStateOf(150f) }
+    var screenMul by remember { mutableFloatStateOf(2f) }
+    var background by remember { mutableStateOf(true) }
+    var grid by remember { mutableStateOf(false) }
+    var wireframe by remember { mutableStateOf(false) }
+    var visibleOnly by remember { mutableStateOf(true) }
+    var busy by remember { mutableStateOf(false) }
 
-    fun bytes(): ByteArray = Exporter.encode(ctl.drawing, ctl.cache, opts)
-
-    val onSaved: (android.net.Uri?) -> Unit = { uri ->
-        if (uri != null) {
-            val data = bytes()
-            scope.launch {
-                val ok = withContext(Dispatchers.IO) {
-                    runCatching { context.contentResolver.openOutputStream(uri)?.use { it.write(data) } != null }.getOrDefault(false)
-                }
-                Toast.makeText(context, if (ok) "Saved" else "Couldn't save the file", Toast.LENGTH_SHORT).show()
-                if (ok) onDismiss()
-            }
+    val regions = com.omarkallas.inkfield.engine.ExportRegion.entries.filter {
+        when (it) {
+            com.omarkallas.inkfield.engine.ExportRegion.ARTBOARD -> d.artboard != null
+            com.omarkallas.inkfield.engine.ExportRegion.SELECTION -> hasSelection
+            com.omarkallas.inkfield.engine.ExportRegion.SCREEN -> screen != null
+            else -> true
         }
     }
-    val savePng = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("image/png"), onSaved)
-    val saveJpg = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("image/jpeg"), onSaved)
-    val saveSvg = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("image/svg+xml"), onSaved)
+    val rect: android.graphics.RectF? = when (region) {
+        com.omarkallas.inkfield.engine.ExportRegion.ARTBOARD -> d.artboard?.let { android.graphics.RectF(it.x, it.y, it.x + it.w, it.y + it.h) }
+        com.omarkallas.inkfield.engine.ExportRegion.SCREEN -> screen
+        else -> null
+    }
+    val only = if (region == com.omarkallas.inkfield.engine.ExportRegion.SELECTION) ctl.selection else null
+    val scale = if (region == com.omarkallas.inkfield.engine.ExportRegion.SCREEN) viewScale * screenMul else ppi / 72f
+    val opts = ExportOptions(format, scale, background, only, rect, grid)
+    val raster = format == ExportFormat.PNG || format == ExportFormat.JPG || format == ExportFormat.PSD || format == ExportFormat.PDF_FLAT
+    val baseName = d.name.replace(Regex("[^A-Za-z0-9 _-]"), "").trim().ifEmpty { "Inkfield" }
+    val fileName = "$baseName.${format.ext}"
+
+    suspend fun writeTo(out: java.io.OutputStream) = withContext(Dispatchers.Default) {
+        if (format == ExportFormat.NATIVE) com.omarkallas.inkfield.data.NativeFile.write(repo, d, out)
+        else Exporter.write(d, com.omarkallas.inkfield.engine.StrokeCache(), opts, out, wireframe, visibleOnly)
+    }
+
+    val saver = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("*/*")) { uri ->
+        if (uri != null) scope.launch {
+            busy = true
+            val ok = runCatching {
+                withContext(Dispatchers.IO) { context.contentResolver.openOutputStream(uri) }?.use { writeTo(it) } != null
+            }.getOrDefault(false)
+            busy = false
+            Toast.makeText(context, if (ok) "Saved" else "Couldn't save the file", Toast.LENGTH_SHORT).show()
+            if (ok) onDismiss()
+        }
+    }
 
     AlertDialog(
-        onDismissRequest = onDismiss,
+        onDismissRequest = { if (!busy) onDismiss() },
         title = { Text("Export") },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                androidx.compose.foundation.layout.FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     ExportFormat.entries.forEach { f -> Chip(f.label, format == f) { format = f } }
                 }
-                if (format != ExportFormat.SVG) {
-                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
-                        listOf(1f to "72", 2f to "150", 4f to "300", 8f to "600").forEach { (k, ppi) ->
-                            Chip("$ppi ppi", scale == k) { scale = k }
+                if (format != ExportFormat.NATIVE && format != ExportFormat.DXF) {
+                    Text("Region", color = Ink.muted, fontSize = 12.sp)
+                    androidx.compose.foundation.layout.FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        regions.forEach { r -> Chip(r.label, region == r) { region = r } }
+                    }
+                }
+                if (raster) {
+                    if (region == com.omarkallas.inkfield.engine.ExportRegion.SCREEN) {
+                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            listOf(1f, 2f, 4f).forEach { k -> Chip("${(k * 100).toInt()}%", screenMul == k) { screenMul = k } }
+                        }
+                    } else {
+                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            listOf(72f, 150f, 300f, 600f).forEach { v -> Chip("${v.toInt()} ppi", ppi == v) { ppi = v } }
                         }
                     }
-                    val (w, h) = Exporter.pixelSize(ctl.drawing, ctl.cache, opts)
+                    val (w, h) = Exporter.pixelSize(d, ctl.cache, opts)
                     Text("$w × $h px", color = Ink.muted, fontSize = 12.sp)
-                } else {
-                    Text("Vector paths, one per stroke. Opens in Illustrator, Inkscape and browsers.", color = Ink.muted, fontSize = 12.sp)
                 }
-                SettingSwitch(
-                    if (format == ExportFormat.JPG) "Include paper (otherwise white)" else "Include paper", background,
-                ) { background = it }
-                if (hasSelection) SettingSwitch("Selection only", selectionOnly) { selectionOnly = it }
+                when (format) {
+                    ExportFormat.SVG -> Text("Vector paths, one per stroke. Textured brushes become flat shapes.", color = Ink.muted, fontSize = 12.sp)
+                    ExportFormat.PDF -> Text("Vector PDF at true size. Textures and masks may be simplified.", color = Ink.muted, fontSize = 12.sp)
+                    ExportFormat.DXF -> {
+                        Text("Lines for CAD and laser cutters, in real units from your drawing scale. Masks and images are left out.", color = Ink.muted, fontSize = 12.sp)
+                        SettingSwitch("Wireframe (centerlines only)", wireframe) { wireframe = it }
+                    }
+                    ExportFormat.PSD -> SettingSwitch("Visible layers only", visibleOnly) { visibleOnly = it }
+                    ExportFormat.NATIVE -> Text("The full drawing with all layers and images, to open in Inkfield on any device.", color = Ink.muted, fontSize = 12.sp)
+                    else -> {}
+                }
+                if (format != ExportFormat.DXF && format != ExportFormat.NATIVE) {
+                    SettingSwitch(if (format == ExportFormat.JPG) "Include paper (otherwise white)" else "Include paper", background) { background = it }
+                    if (raster && d.precision.gridOn) SettingSwitch("Include grid", grid) { grid = it }
+                }
+                if (busy) Text("Exporting…", color = Ink.accent, fontSize = 13.sp)
             }
         },
         confirmButton = {
-            TextButton(onClick = {
-                when (format) {
-                    ExportFormat.PNG -> savePng.launch(fileName)
-                    ExportFormat.JPG -> saveJpg.launch(fileName)
-                    ExportFormat.SVG -> saveSvg.launch(fileName)
-                }
-            }) { Text("Save to device") }
+            TextButton(enabled = !busy, onClick = { saver.launch(fileName) }) { Text("Save to device") }
         },
         dismissButton = {
-            TextButton(onClick = {
+            TextButton(enabled = !busy, onClick = {
                 scope.launch {
-                    val data = bytes()
-                    val file = withContext(Dispatchers.IO) {
+                    busy = true
+                    val file = runCatching {
                         val dir = File(context.cacheDir, "exports").apply { mkdirs() }
-                        File(dir, fileName).also { it.writeBytes(data) }
-                    }
+                        val f = File(dir, fileName)
+                        withContext(Dispatchers.IO) { f.outputStream() }.use { writeTo(it) }
+                        f
+                    }.getOrNull()
+                    busy = false
+                    if (file == null) { Toast.makeText(context, "Couldn't export", Toast.LENGTH_SHORT).show(); return@launch }
                     val uri = FileProvider.getUriForFile(context, context.packageName + ".files", file)
                     val send = Intent(Intent.ACTION_SEND).apply {
                         type = format.mime
@@ -748,4 +923,115 @@ private fun ExportDialog(ctl: EditorController, onDismiss: () -> Unit) {
             }) { Text("Share") }
         },
     )
+}
+
+
+@Composable
+private fun ActionPicker(label: String, initial: com.omarkallas.inkfield.prefs.GestureAction, onPick: (com.omarkallas.inkfield.prefs.GestureAction) -> Unit) {
+    var value by remember { mutableStateOf(initial) }
+    var open by remember { mutableStateOf(false) }
+    Row(Modifier.fillMaxWidth().padding(vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+        Text(label, fontSize = 14.sp, modifier = Modifier.weight(1f))
+        Box {
+            TextButton(onClick = { open = true }) { Text(value.label) }
+            androidx.compose.material3.DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+                com.omarkallas.inkfield.prefs.GestureAction.entries.forEach { a ->
+                    androidx.compose.material3.DropdownMenuItem(text = { Text(a.label) }, onClick = { value = a; onPick(a); open = false })
+                }
+            }
+        }
+    }
+}
+
+/** Lists shortcuts; tap one, then press the new key combination. */
+@Composable
+private fun ShortcutEditor(prefs: com.omarkallas.inkfield.prefs.Prefs) {
+    var map by remember { mutableStateOf(prefs.shortcuts) }
+    var capturing by remember { mutableStateOf<String?>(null) }
+    com.omarkallas.inkfield.prefs.Prefs.SHORTCUT_LABELS.forEach { (key, label) ->
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Text(label, fontSize = 13.sp, modifier = Modifier.weight(1f))
+            TextButton(onClick = { capturing = key }) { Text(map[key] ?: "—", fontSize = 13.sp) }
+        }
+    }
+    TextButton(onClick = { map = com.omarkallas.inkfield.prefs.Prefs.DEFAULT_SHORTCUTS; prefs.shortcuts = map }) { Text("Reset all shortcuts") }
+    capturing?.let { key ->
+        val focus = remember { androidx.compose.ui.focus.FocusRequester() }
+        AlertDialog(
+            onDismissRequest = { capturing = null },
+            title = { Text("Press the new shortcut") },
+            text = {
+                Box(
+                    Modifier.size(240.dp, 60.dp).focusRequester(focus).focusable()
+                        .onPreviewKeyEvent { ev ->
+                            if (ev.type != androidx.compose.ui.input.key.KeyEventType.KeyDown) return@onPreviewKeyEvent false
+                            val code = ev.nativeKeyEvent.keyCode
+                            val modifierOnly = code in listOf(
+                                android.view.KeyEvent.KEYCODE_CTRL_LEFT, android.view.KeyEvent.KEYCODE_CTRL_RIGHT,
+                                android.view.KeyEvent.KEYCODE_SHIFT_LEFT, android.view.KeyEvent.KEYCODE_SHIFT_RIGHT,
+                                android.view.KeyEvent.KEYCODE_ALT_LEFT, android.view.KeyEvent.KEYCODE_ALT_RIGHT,
+                                android.view.KeyEvent.KEYCODE_META_LEFT, android.view.KeyEvent.KEYCODE_META_RIGHT,
+                            )
+                            if (modifierOnly) return@onPreviewKeyEvent true
+                            val spec = com.omarkallas.inkfield.prefs.KeySpec.of(ev.nativeKeyEvent)
+                            map = map + (key to spec)
+                            prefs.shortcuts = map
+                            capturing = null
+                            true
+                        },
+                    contentAlignment = Alignment.Center,
+                ) { Text("Waiting for a key…", color = Ink.muted) }
+                LaunchedEffect(Unit) { runCatching { focus.requestFocus() } }
+            },
+            confirmButton = { TextButton(onClick = { map = map - key; prefs.shortcuts = map; capturing = null }) { Text("Clear") } },
+            dismissButton = { TextButton(onClick = { capturing = null }) { Text("Cancel") } },
+        )
+    }
+}
+
+/** Artboard presets, size, orientation and placement. */
+@OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
+@Composable
+private fun ArtboardSection(ctl: EditorController, onDismiss: () -> Unit) {
+    val a = ctl.drawing.artboard
+    Text("Artboard", fontWeight = FontWeight.SemiBold)
+    Text("A fixed frame for composing and exporting at an exact size.", color = Ink.muted, fontSize = 12.sp)
+    androidx.compose.foundation.layout.FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        com.omarkallas.inkfield.model.ArtboardPreset.entries.forEach { p ->
+            Chip(p.label, a?.name == p.label) {
+                // Keep the center when switching sizes.
+                val cx = a?.let { it.x + it.w / 2 } ?: 0f
+                val cy = a?.let { it.y + it.h / 2 } ?: 0f
+                ctl.setArtboard(com.omarkallas.inkfield.model.Artboard(cx - p.w / 2, cy - p.h / 2, p.w, p.h, p.label))
+            }
+        }
+    }
+    if (a != null) {
+        val m = ctl.drawing.precision.measure
+        Text(
+            "${com.omarkallas.inkfield.engine.Units.length(a.w, m)} × ${com.omarkallas.inkfield.engine.Units.length(a.h, m)}",
+            color = Ink.muted, fontSize = 12.sp,
+        )
+        androidx.compose.foundation.layout.FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Chip("Rotate 90°", false) { ctl.setArtboard(a.copy(x = a.x + (a.w - a.h) / 2, y = a.y + (a.h - a.w) / 2, w = a.h, h = a.w)) }
+            Chip("Move on canvas", false) { ctl.artboardEditing = true; onDismiss() }
+            Chip("Fit to drawing", false) {
+                com.omarkallas.inkfield.engine.Renderer.contentBounds(ctl.drawing, ctl.cache)?.let { b ->
+                    ctl.setArtboard(a.copy(x = b.centerX() - a.w / 2, y = b.centerY() - a.h / 2))
+                }
+            }
+            Chip("Remove", false) { ctl.setArtboard(null) }
+        }
+        var w by remember(a) { mutableStateOf(a.w.roundToInt().toString()) }
+        var h by remember(a) { mutableStateOf(a.h.roundToInt().toString()) }
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            OutlinedTextField(w, { w = it }, label = { Text("W (pt/px)") }, singleLine = true, modifier = Modifier.weight(1f))
+            Spacer(Modifier.width(6.dp))
+            OutlinedTextField(h, { h = it }, label = { Text("H (pt/px)") }, singleLine = true, modifier = Modifier.weight(1f))
+            TextButton(onClick = {
+                val nw = w.toFloatOrNull(); val nh = h.toFloatOrNull()
+                if (nw != null && nh != null && nw > 1 && nh > 1) ctl.setArtboard(a.copy(w = nw, h = nh, name = "Custom"))
+            }) { Text("Set") }
+        }
+    }
 }

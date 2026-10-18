@@ -55,11 +55,12 @@ class MainActivity : ComponentActivity() {
             GalleryScreen(
                 repo,
                 onOpen = { openId = it },
-                onNew = {
+                onNew = { folder ->
                     val now = System.currentTimeMillis()
                     val count = repo.list().count { it.deletedAt == null } + 1
                     val d = Drawing.blank(repo.newId(), "Drawing $count", now).copy(background = prefs.defaultPaper)
                     repo.save(d, null)
+                    repo.moveDrawing(d.id, folder)
                     openId = d.id
                 },
             )
@@ -84,22 +85,38 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    /** Keyboard shortcuts for ChromeOS, DeX and tablets with keyboards. */
+    /** Keyboard shortcuts for ChromeOS, DeX and tablets with keyboards (editable in Settings). */
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
         val ctl = editor
-        if (ctl != null && event.action == KeyEvent.ACTION_DOWN) {
-            val ctrl = event.isCtrlPressed || event.isMetaPressed
-            when {
-                ctrl && event.keyCode == KeyEvent.KEYCODE_Z && event.isShiftPressed -> { ctl.redo(); return true }
-                ctrl && event.keyCode == KeyEvent.KEYCODE_Z -> { ctl.undo(); return true }
-                ctrl && event.keyCode == KeyEvent.KEYCODE_Y -> { ctl.redo(); return true }
-                ctrl && event.keyCode == KeyEvent.KEYCODE_D -> { ctl.duplicateSelection(); return true }
-                (event.keyCode == KeyEvent.KEYCODE_DEL || event.keyCode == KeyEvent.KEYCODE_FORWARD_DEL) && ctl.selection.isNotEmpty() -> {
-                    ctl.deleteSelection(); return true
-                }
-                event.keyCode == KeyEvent.KEYCODE_ESCAPE && ctl.selection.isNotEmpty() -> { ctl.clearSelection(); return true }
+        if (ctl == null || !prefs.shortcutsEnabled) return super.dispatchKeyEvent(event)
+        val map = prefs.shortcuts
+        // Holding the pan key pans with any tool; it ends when the key is released.
+        map["PAN"]?.let { spec ->
+            val code = KeyEvent.keyCodeFromString("KEYCODE_" + spec.split("+").last())
+            if (event.keyCode == code && !event.isCtrlPressed) {
+                ctl.tempPan = event.action == KeyEvent.ACTION_DOWN
+                return true
             }
         }
-        return super.dispatchKeyEvent(event)
+        // Let focused text fields have their keys first.
+        if (super.dispatchKeyEvent(event)) return true
+        if (event.action != KeyEvent.ACTION_DOWN) return false
+        val action = map.entries.firstOrNull { com.omarkallas.inkfield.prefs.KeySpec.matches(it.value, event) }?.key ?: return false
+        when (action) {
+            "UNDO" -> ctl.undo()
+            "REDO" -> ctl.redo()
+            "DUPLICATE" -> ctl.duplicateSelection()
+            "DELETE" -> if (ctl.selection.isNotEmpty()) ctl.deleteSelection() else return false
+            "DESELECT" -> if (ctl.selection.isNotEmpty()) ctl.clearSelection() else return false
+            "SELECT_ALL" -> ctl.perform(com.omarkallas.inkfield.prefs.GestureAction.SELECT_ALL)
+            "TOGGLE_UI" -> ctl.perform(com.omarkallas.inkfield.prefs.GestureAction.TOGGLE_UI)
+            "SHOW_LAYERS" -> ctl.perform(com.omarkallas.inkfield.prefs.GestureAction.SHOW_LAYERS)
+            "ERASER" -> ctl.perform(com.omarkallas.inkfield.prefs.GestureAction.ERASER)
+            "ZOOM_IN" -> ctl.zoomRequest = 1.25f
+            "ZOOM_OUT" -> ctl.zoomRequest = 0.8f
+            "RESET_VIEW" -> ctl.resetViewRequest++
+            else -> return false
+        }
+        return true
     }
 }

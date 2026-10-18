@@ -139,6 +139,8 @@ data class Drawing(
     val viewport: Viewport = Viewport(),
     val nextId: Long = 1000,
     val precision: Precision = Precision(),
+    /** Optional fixed frame for composition and export, in canvas units (points). */
+    val artboard: Artboard? = null,
 ) {
     fun layer(id: Long): Layer? = layers.firstOrNull { it.id == id }
     val activeLayer: Layer get() = layer(activeLayerId) ?: layers.last()
@@ -152,6 +154,24 @@ data class Drawing(
             )
         }
     }
+}
+
+@Serializable
+data class Artboard(val x: Float, val y: Float, val w: Float, val h: Float, val name: String = "Custom")
+
+/** Artboard presets in points (paper sizes) or pixels (screens, where 1 px = 1 pt). */
+enum class ArtboardPreset(val label: String, val w: Float, val h: Float) {
+    A5("A5", 419.53f, 595.28f),
+    A4("A4", 595.28f, 841.89f),
+    A3("A3", 841.89f, 1190.55f),
+    A2("A2", 1190.55f, 1683.78f),
+    LETTER("US Letter", 612f, 792f),
+    LEGAL("US Legal", 612f, 1008f),
+    TABLOID("Tabloid", 792f, 1224f),
+    SQUARE("Square 1080", 1080f, 1080f),
+    HD("Screen 1920×1080", 1920f, 1080f),
+    PHONE("Phone 1080×2400", 1080f, 2400f),
+    STORY("Story 1080×1920", 1080f, 1920f),
 }
 
 enum class Paper(val label: String, val color: Int, val dark: Boolean = false) {

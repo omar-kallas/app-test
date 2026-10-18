@@ -21,7 +21,8 @@ import kotlin.math.sqrt
 class Dir(val x: Float, val y: Float)
 
 object Grid {
-    private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val paintTL = ThreadLocal.withInitial { Paint(Paint.ANTI_ALIAS_FLAG) }
+    private val paint: Paint get() = paintTL.get()!!
     private const val SQRT3 = 1.7320508f
 
     private fun rad(deg: Float) = deg * PI.toFloat() / 180f

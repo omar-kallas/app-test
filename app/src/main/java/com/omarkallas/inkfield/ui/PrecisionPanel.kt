@@ -158,6 +158,9 @@ fun PrecisionOptions(ctl: EditorController, section: PrecisionSection, onClose: 
                             Chip("Portrait", g.portrait) { ctl.updatePrecision { it.copy(grid = it.grid.copy(portrait = true)) } }
                         }
                     }
+                    if (ctl.drawing.artboard != null) {
+                        SwitchRow("Only inside the artboard", g.confine) { v -> ctl.updatePrecision { it.copy(grid = it.grid.copy(confine = v)) } }
+                    }
                     Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                         Chip(if (g.type.perspective) "Move vanishing points" else "Move / rotate on canvas", false) { onEditGrid() }
                         Chip("Reset", false) {

@@ -17,7 +17,14 @@ enum class ExportFormat(val ext: String, val mime: String, val label: String) {
     PNG("png", "image/png", "PNG"),
     JPG("jpg", "image/jpeg", "JPG"),
     SVG("svg", "image/svg+xml", "SVG"),
+    PDF("pdf", "application/pdf", "PDF (vector)"),
+    PDF_FLAT("pdf", "application/pdf", "PDF (flattened)"),
+    PSD("psd", "image/vnd.adobe.photoshop", "PSD (layers)"),
+    DXF("dxf", "image/vnd.dxf", "DXF (CAD)"),
+    NATIVE("inkfield", "application/octet-stream", "Inkfield file"),
 }
+
+enum class ExportRegion(val label: String) { DRAWING("Entire drawing"), ARTBOARD("Artboard"), SELECTION("Selection"), SCREEN("Screen") }
 
 class ExportOptions(
     val format: ExportFormat,
@@ -26,6 +33,9 @@ class ExportOptions(
     val includeBackground: Boolean,
     /** Export only these strokes (a selection), or everything when null. */
     val only: Set<Long>? = null,
+    /** Exact canvas rectangle to export (artboard, screen), or null to fit the content. */
+    val region: RectF? = null,
+    val includeGrid: Boolean = false,
 )
 
 object Exporter {
@@ -34,6 +44,8 @@ object Exporter {
 
     private fun subset(d: Drawing, only: Set<Long>?): Drawing =
         if (only == null) d else d.copy(strokes = d.strokes.filter { it.id in only })
+
+    fun bounds(d: Drawing, cache: StrokeCache, o: ExportOptions): RectF = o.region?.let { RectF(it) } ?: bounds(d, cache, o.only)
 
     fun bounds(d: Drawing, cache: StrokeCache, only: Set<Long>?): RectF {
         val b = Renderer.contentBounds(subset(d, only), cache) ?: RectF(0f, 0f, 800f, 600f)
@@ -52,14 +64,14 @@ object Exporter {
     }
 
     fun pixelSize(d: Drawing, cache: StrokeCache, o: ExportOptions): Pair<Int, Int> {
-        val b = bounds(d, cache, o.only)
+        val b = bounds(d, cache, o)
         val k = effectiveScale(b, o.scale)
         return (b.width() * k).roundToInt().coerceAtLeast(1) to (b.height() * k).roundToInt().coerceAtLeast(1)
     }
 
     fun renderBitmap(d: Drawing, cache: StrokeCache, o: ExportOptions): Bitmap {
         val src = subset(d, o.only)
-        val b = bounds(d, cache, o.only)
+        val b = bounds(d, cache, o)
         val k = effectiveScale(b, o.scale)
         val w = (b.width() * k).roundToInt().coerceAtLeast(1)
         val h = (b.height() * k).roundToInt().coerceAtLeast(1)
@@ -71,6 +83,10 @@ object Exporter {
         }
         c.scale(k, k)
         c.translate(-b.left, -b.top)
+        if (o.includeGrid && d.precision.gridOn) {
+            val dark = androidx.core.graphics.ColorUtils.calculateLuminance(d.background) < 0.4
+            Grid.draw(c, d.precision.grid, b, k, dark, 1f)
+        }
         Renderer.drawStrokes(c, src, cache, RenderOptions(viewScale = k))
         return bmp
     }
@@ -82,6 +98,18 @@ object Exporter {
         bmp.compress(if (o.format == ExportFormat.JPG) Bitmap.CompressFormat.JPEG else Bitmap.CompressFormat.PNG, 95, out)
         bmp.recycle()
         return out.toByteArray()
+    }
+
+    /** Writes the export straight to [out]; heavy formats (PSD) stream instead of building bytes in memory. */
+    fun write(d: Drawing, cache: StrokeCache, o: ExportOptions, out: java.io.OutputStream, wireframe: Boolean = false, visibleOnly: Boolean = true) {
+        when (o.format) {
+            ExportFormat.PNG, ExportFormat.JPG, ExportFormat.SVG -> out.write(encode(d, cache, o))
+            ExportFormat.PDF, ExportFormat.PDF_FLAT ->
+                ExportExtra.pdf(d, cache, bounds(d, cache, o), o.includeBackground, o.format == ExportFormat.PDF_FLAT, o.scale * 72f, o.only, out)
+            ExportFormat.PSD -> ExportExtra.psd(d, cache, bounds(d, cache, o), o.scale, o.includeBackground, visibleOnly, o.only, out)
+            ExportFormat.DXF -> ExportExtra.dxf(d, cache, wireframe, o.only, out)
+            ExportFormat.NATIVE -> error("Native files are written by NativeFile")
+        }
     }
 
     /** Small thumbnail for the gallery. */
@@ -108,7 +136,7 @@ object Exporter {
 
     fun svg(d: Drawing, cache: StrokeCache, o: ExportOptions): String {
         val src = subset(d, o.only)
-        val b = bounds(d, cache, o.only)
+        val b = bounds(d, cache, o)
         val sb = StringBuilder()
         sb.append("""<?xml version="1.0" encoding="UTF-8"?>""").append('\n')
         sb.append("""<svg xmlns="http://www.w3.org/2000/svg" width="${f(b.width())}pt" height="${f(b.height())}pt" viewBox="${f(b.left)} ${f(b.top)} ${f(b.width())} ${f(b.height())}">""").append('\n')

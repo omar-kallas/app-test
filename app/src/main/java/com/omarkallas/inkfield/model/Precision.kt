@@ -36,6 +36,8 @@ data class GridSettings(
     val density: Int = 36,
     /** Vanishing points for perspective grids (1, 2 or 3 used). */
     val vps: List<Pt> = listOf(Pt(400f, 300f), Pt(-200f, 300f), Pt(1000f, 300f), Pt(400f, 2200f)),
+    /** Draw the grid only inside the artboard. */
+    val confine: Boolean = false,
 )
 
 @Serializable

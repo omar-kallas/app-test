@@ -504,7 +504,7 @@ fun DrawScope.drawStampSample(b: CustomBrush, c: Offset, r: Float, color: Color)
 private fun ctlSetTool(ctl: EditorController, i: Int, t: ToolType) = ctl.setSlotTool(i, t)
 
 @Composable
-fun MenuRow(active: Boolean, onClick: () -> Unit, content: @Composable () -> Unit) {
+fun MenuRow(active: Boolean, onClick: () -> Unit, content: @Composable androidx.compose.foundation.layout.RowScope.() -> Unit) {
     Row(
         Modifier
             .fillMaxWidth()

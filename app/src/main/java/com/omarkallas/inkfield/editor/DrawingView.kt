@@ -48,7 +48,7 @@ import kotlin.math.roundToInt
 @SuppressLint("ViewConstructor")
 class DrawingView(context: Context, private val ctl: EditorController) : View(context) {
 
-    private enum class Mode { NONE, DRAW, NAVIGATE, LASSO, SLICE, SEL_MOVE, SEL_SCALE, SEL_ROTATE, SEL_PINCH, SEL_DISTORT, EYEDROP, GUIDE_EDIT, GRID_EDIT, NUDGE, TEXT_TAP, IGNORE }
+    private enum class Mode { NONE, DRAW, NAVIGATE, LASSO, SLICE, SEL_MOVE, SEL_SCALE, SEL_ROTATE, SEL_PINCH, SEL_DISTORT, ARTBOARD_EDIT, EYEDROP, GUIDE_EDIT, GRID_EDIT, NUDGE, TEXT_TAP, IGNORE }
 
     private val density = resources.displayMetrics.density
     private val touchSlop = ViewConfiguration.get(context).scaledTouchSlop.toFloat()
@@ -184,9 +184,60 @@ class DrawingView(context: Context, private val ctl: EditorController) : View(co
     // Drawing
     // ------------------------------------------------------------------
 
+    /** While a stroke is being drawn, everything else is rendered once into this bitmap. */
+    private var sceneCache: android.graphics.Bitmap? = null
+    private var sceneCacheValid = false
+
+    private fun renderScene(canvas: Canvas, visible: RectF, scale: Float) {
+        val d = ctl.drawing
+        val pre = d.precision
+        canvas.drawColor(d.background)
+        canvas.save()
+        canvas.concat(view)
+        d.artboard?.let { drawArtboardShade(canvas, it, visible) }
+        if (pre.gridOn) {
+            canvas.save()
+            val ab = d.artboard
+            if (pre.grid.confine && ab != null) canvas.clipRect(ab.x, ab.y, ab.x + ab.w, ab.y + ab.h)
+            Grid.draw(canvas, pre.grid, visible, scale, isDarkPaper(), density)
+            canvas.restore()
+        }
+        Renderer.drawStrokes(canvas, d, ctl.cache, RenderOptions(scale, visible, null, null))
+        canvas.restore()
+    }
+
+    /** Draws the artboard frame and dims the canvas outside it. */
+    private fun drawArtboardShade(canvas: Canvas, a: com.omarkallas.inkfield.model.Artboard, visible: RectF) {
+        val p = Paint(Paint.ANTI_ALIAS_FLAG)
+        p.color = if (isDarkPaper()) 0x22FFFFFF else 0x14000000
+        val big = RectF(visible); big.inset(-visible.width(), -visible.height())
+        canvas.save()
+        canvas.clipOutRect(a.x, a.y, a.x + a.w, a.y + a.h)
+        canvas.drawRect(big, p)
+        canvas.restore()
+        p.style = Paint.Style.STROKE
+        p.strokeWidth = 1.2f * density / scaleOf(view)
+        p.color = if (isDarkPaper()) 0x99FFFFFF.toInt() else 0x66000000
+        canvas.drawRect(a.x, a.y, a.x + a.w, a.y + a.h, p)
+    }
+
     override fun onDraw(canvas: Canvas) {
         val d = ctl.drawing
         if (!viewInitialized) applyViewport(d.viewport)
+        // Fast path while drawing: reuse the scene rendered at stroke start, then add the live stroke.
+        if (mode == Mode.DRAW && sceneCacheValid && sceneCache != null) {
+            canvas.drawBitmap(sceneCache!!, 0f, 0f, null)
+            canvas.save()
+            canvas.concat(view)
+            activeGuide()?.let { g ->
+                tmpRect.set(0f, 0f, width.toFloat(), height.toFloat()); val vis = RectF(); inverse.mapRect(vis, tmpRect)
+                drawGuideTemplate(canvas, g, scaleOf(view), vis)
+            }
+            if (liveCount > 0) drawLive(canvas, scaleOf(view))
+            canvas.restore()
+            if (d.precision.measureOn) { tmpRect.set(0f, 0f, width.toFloat(), height.toFloat()); val vis = RectF(); inverse.mapRect(vis, tmpRect); drawMeasureLabels(canvas, vis) }
+            return
+        }
         canvas.drawColor(d.background)
 
         val scale = scaleOf(view)
@@ -201,7 +252,14 @@ class DrawingView(context: Context, private val ctl: EditorController) : View(co
         val pre = d.precision
         canvas.save()
         canvas.concat(view)
-        if (pre.gridOn) Grid.draw(canvas, pre.grid, visible, scale, isDarkPaper(), density)
+        d.artboard?.let { drawArtboardShade(canvas, it, visible) }
+        if (pre.gridOn) {
+            canvas.save()
+            val ab = d.artboard
+            if (pre.grid.confine && ab != null) canvas.clipRect(ab.x, ab.y, ab.x + ab.w, ab.y + ab.h)
+            Grid.draw(canvas, pre.grid, visible, scale, isDarkPaper(), density)
+            canvas.restore()
+        }
         Renderer.drawStrokes(canvas, d, ctl.cache, RenderOptions(scale, visible, highlight, skip))
         if (skip != null) Renderer.drawTransformed(canvas, ctl.selectedStrokes(), ctl.cache, selMatrix, scale, d)
         activeGuide()?.let { drawGuideTemplate(canvas, it, scale, visible) }
@@ -211,6 +269,10 @@ class DrawingView(context: Context, private val ctl: EditorController) : View(co
         if (pre.measureOn) drawMeasureLabels(canvas, visible)
         activeGuide()?.let { drawGuideHandles(canvas, it) }
         if (ctl.gridEditing && pre.gridOn) drawGridHandles(canvas)
+        if (ctl.artboardEditing) d.artboard?.let { a ->
+            val c = floatArrayOf(a.x + a.w / 2f, a.y + a.h / 2f); view.mapPoints(c)
+            drawHandle(canvas, c[0], c[1], 10f * density)
+        }
 
         if (sel.isNotEmpty()) drawSelectionOverlay(canvas)
         if (mode == Mode.LASSO && lassoCount >= 2) drawLasso(canvas)
@@ -363,6 +425,19 @@ class DrawingView(context: Context, private val ctl: EditorController) : View(co
             return
         }
         val mouse = e.getToolType(0) == MotionEvent.TOOL_TYPE_MOUSE
+        if (stylus && (e.buttonState and (MotionEvent.BUTTON_STYLUS_PRIMARY or MotionEvent.BUTTON_STYLUS_SECONDARY)) != 0 &&
+            ctl.prefs.stylusButton != com.omarkallas.inkfield.prefs.GestureAction.NONE
+        ) {
+            ctl.perform(ctl.prefs.stylusButton)
+            mode = Mode.IGNORE
+            return
+        }
+        if (ctl.tempPan) { startNavigate(e); return }
+        if (ctl.artboardEditing && ctl.drawing.artboard != null) {
+            mode = Mode.ARTBOARD_EDIT
+            toCanvas(e.x, e.y, lastCanvasPt)
+            return
+        }
         if (mouse && (e.buttonState and (MotionEvent.BUTTON_SECONDARY or MotionEvent.BUTTON_TERTIARY)) != 0) {
             startNavigate(e); return
         }
@@ -454,6 +529,12 @@ class DrawingView(context: Context, private val ctl: EditorController) : View(co
             Mode.EYEDROP -> { sampleAt(e.getX(idx), e.getY(idx)); invalidate() }
             Mode.GUIDE_EDIT -> guideDrag(e.getX(idx), e.getY(idx))
             Mode.NUDGE -> nudgeMove(e, idx)
+            Mode.ARTBOARD_EDIT -> {
+                val p = PointF(); toCanvas(e.getX(idx), e.getY(idx), p)
+                ctl.drawing.artboard?.let { a -> ctl.moveArtboardLive(a.copy(x = a.x + p.x - lastCanvasPt.x, y = a.y + p.y - lastCanvasPt.y)) }
+                lastCanvasPt.set(p)
+                invalidate()
+            }
             Mode.GRID_EDIT -> gridDrag(e.getX(idx), e.getY(idx))
             else -> {}
         }
@@ -479,14 +560,16 @@ class DrawingView(context: Context, private val ctl: EditorController) : View(co
             Mode.NAVIGATE -> {
                 ctl.setViewport(currentViewport())
                 val quick = e.eventTime - gestureStartTime < 350 && !gestureMoved
-                if (quick && gestureMaxPointers == 2) ctl.undo()
-                else if (quick && gestureMaxPointers == 3) ctl.redo()
+                if (quick && gestureMaxPointers == 2) ctl.perform(ctl.prefs.tap2)
+                else if (quick && gestureMaxPointers == 3) ctl.perform(ctl.prefs.tap3)
+                else if (quick && gestureMaxPointers == 4) ctl.perform(ctl.prefs.tap4)
                 else if (quick && gestureMaxPointers == 1 && ctl.selection.isNotEmpty()) ctl.clearSelection()
             }
             Mode.SEL_MOVE, Mode.SEL_SCALE, Mode.SEL_ROTATE, Mode.SEL_PINCH, Mode.SEL_DISTORT -> commitSelectionTransform()
             Mode.EYEDROP -> finishEyedrop()
             Mode.GUIDE_EDIT, Mode.GRID_EDIT -> { editGuideStart = null; editGridStart = null }
             Mode.NUDGE -> ctl.nudgeEnd()
+            Mode.ARTBOARD_EDIT -> ctl.moveArtboardEnd()
             Mode.TEXT_TAP -> if (!gestureMoved) {
                 val hit = EditOps.pick(ctl.drawing, ctl.cache, lastCanvasPt.x, lastCanvasPt.y, 6f * density / scaleOf(view))
                 if (hit != null && hit.brush == com.omarkallas.inkfield.model.BrushType.TEXT) ctl.textEditId = hit.id
@@ -494,8 +577,9 @@ class DrawingView(context: Context, private val ctl: EditorController) : View(co
             }
             Mode.IGNORE -> {
                 val quick = e.eventTime - gestureStartTime < 350 && !gestureMoved
-                if (!gestureFromStylus && quick && gestureMaxPointers == 2) ctl.undo()
-                else if (!gestureFromStylus && quick && gestureMaxPointers == 3) ctl.redo()
+                if (!gestureFromStylus && quick && gestureMaxPointers == 2) ctl.perform(ctl.prefs.tap2)
+                else if (!gestureFromStylus && quick && gestureMaxPointers == 3) ctl.perform(ctl.prefs.tap3)
+                else if (!gestureFromStylus && quick && gestureMaxPointers == 4) ctl.perform(ctl.prefs.tap4)
             }
             else -> {}
         }
@@ -551,6 +635,7 @@ class DrawingView(context: Context, private val ctl: EditorController) : View(co
     // ---- hold to select ----
     private fun scheduleHold(x: Float, y: Float) {
         cancelHold()
+        if (!ctl.prefs.holdSelects) return
         val r = Runnable {
             holdPending = null
             if (gestureMoved) return@Runnable
@@ -576,8 +661,22 @@ class DrawingView(context: Context, private val ctl: EditorController) : View(co
         beginLive(e, 0)
     }
 
+    private fun buildSceneCache() {
+        sceneCacheValid = false
+        if (width <= 0 || height <= 0 || ctl.drawing.strokes.size < 150) return
+        val bmp = sceneCache?.takeIf { it.width == width && it.height == height }
+            ?: runCatching { android.graphics.Bitmap.createBitmap(width, height, android.graphics.Bitmap.Config.ARGB_8888) }.getOrNull()
+            ?: return
+        sceneCache = bmp
+        tmpRect.set(0f, 0f, width.toFloat(), height.toFloat())
+        val vis = RectF(); inverse.mapRect(vis, tmpRect)
+        renderScene(Canvas(bmp), vis, scaleOf(view))
+        sceneCacheValid = true
+    }
+
     private fun beginLive(e: MotionEvent, idx: Int) {
         if (ctl.selection.isNotEmpty()) ctl.clearSelection()
+        buildSceneCache()
         liveBrush = ctl.slot.brush
         liveCount = 0
         livePredictedCount = 0
@@ -693,13 +792,15 @@ class DrawingView(context: Context, private val ctl: EditorController) : View(co
             val abs0 = navStartScale * ds
             val clamped = abs0.coerceIn(0.02f, 64f)
             ds = clamped / navStartScale
-            if (abs(clamped - 1f) < 0.06f) ds = 1f / navStartScale // snap to 100%
+            if (ctl.prefs.zoomSnap && abs(clamped - 1f) < 0.06f) ds = 1f / navStartScale // snap to 100%
+            if (!ctl.prefs.zoomEnabled) ds = 1f
             var da = a - navA0
             while (da > 180f) da -= 360f
             while (da < -180f) da += 360f
             val absRot = navStartRot + da
             val nearest = (absRot / 90f).roundToInt() * 90f
-            if (abs(absRot - nearest) < 5f) da = nearest - navStartRot // snap to right angles
+            if (ctl.prefs.rotateSnap && abs(absRot - nearest) < 5f) da = nearest - navStartRot // snap to right angles
+            if (!ctl.prefs.rotateEnabled) da = 0f
             m.postScale(ds, ds)
             m.postRotate(da)
         }
@@ -1341,6 +1442,25 @@ class DrawingView(context: Context, private val ctl: EditorController) : View(co
         ctl.nudgeStep(lastCanvasPt.x, lastCanvasPt.y, p.x - lastCanvasPt.x, p.y - lastCanvasPt.y, r)
         lastCanvasPt.set(p)
         cursor.set(e.getX(idx), e.getY(idx))
+        invalidate()
+    }
+
+    /** Canvas rectangle currently on screen (axis-aligned bounds), for "Screen" exports. */
+    fun visibleCanvasRect(): RectF {
+        tmpRect.set(0f, 0f, width.toFloat(), height.toFloat())
+        return RectF().also { inverse.mapRect(it, tmpRect) }
+    }
+
+    fun currentScale(): Float = scaleOf(view)
+
+    /** Zooms around the view center (keyboard shortcuts). */
+    fun zoomBy(k: Float) {
+        val cur = scaleOf(view)
+        val target = (cur * k).coerceIn(0.02f, 64f)
+        view.postScale(target / cur, target / cur, width / 2f, height / 2f)
+        view.invert(inverse)
+        publishReadout()
+        ctl.setViewport(currentViewport())
         invalidate()
     }
 }

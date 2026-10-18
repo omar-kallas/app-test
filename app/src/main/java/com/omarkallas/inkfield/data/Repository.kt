@@ -19,6 +19,9 @@ import java.util.UUID
 class Repository(context: Context) {
     private val dir = File(context.filesDir, "drawings").apply { mkdirs() }
 
+    /** Optional copy of every drawing in a user-chosen device folder. */
+    val mirror = Mirror(context)
+
     val json = Json {
         ignoreUnknownKeys = true
         encodeDefaults = true
@@ -167,6 +170,7 @@ class Repository(context: Context) {
     }
 
     fun deleteForever(id: String) {
+        if (mirror.treeUri != null) load(id)?.let { mirror.remove(it) }
         docFile(id).delete(); metaFile(id).delete(); thumbFile(id).delete()
     }
 

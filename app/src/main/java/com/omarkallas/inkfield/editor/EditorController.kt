@@ -164,6 +164,58 @@ class EditorController(initial: Drawing, val prefs: Prefs) {
         return d.copy(layers = d.layers + layer, activeLayerId = id, nextId = id + 1) to id
     }
 
+    // ---- interface state driven by gestures and shortcuts ----
+    /** Requests the editor screen handles (show a panel, hide the UI...). Consumed by the screen. */
+    var uiRequest by mutableStateOf<com.omarkallas.inkfield.prefs.GestureAction?>(null)
+    var uiHidden by mutableStateOf(false)
+    /** Space held: the canvas pans regardless of the active tool. */
+    var tempPan by mutableStateOf(false)
+    /** Keyboard zoom factor waiting for the canvas to apply it. */
+    var zoomRequest by mutableStateOf<Float?>(null)
+    var artboardEditing by mutableStateOf(false)
+    var toolbarMode by mutableStateOf(prefs.toolbarMode)
+    var uiScale by mutableStateOf(prefs.uiScale)
+
+    fun perform(a: com.omarkallas.inkfield.prefs.GestureAction) {
+        when (a) {
+            com.omarkallas.inkfield.prefs.GestureAction.NONE -> {}
+            com.omarkallas.inkfield.prefs.GestureAction.UNDO -> undo()
+            com.omarkallas.inkfield.prefs.GestureAction.REDO -> redo()
+            com.omarkallas.inkfield.prefs.GestureAction.SELECT_LAST -> drawing.strokes.lastOrNull { !it.locked }?.let { selectIds(setOf(it.id)); selectTool() }
+            com.omarkallas.inkfield.prefs.GestureAction.SELECT_ALL -> selectAllInLayer(drawing.activeLayerId)
+            com.omarkallas.inkfield.prefs.GestureAction.TOGGLE_GUIDE -> updatePrecision { it.copy(guideOn = !it.guideOn) }
+            com.omarkallas.inkfield.prefs.GestureAction.TOGGLE_UI -> uiHidden = !uiHidden
+            com.omarkallas.inkfield.prefs.GestureAction.TOGGLE_ROTATION -> prefs.rotateEnabled = !prefs.rotateEnabled
+            com.omarkallas.inkfield.prefs.GestureAction.TOGGLE_ZOOM -> prefs.zoomEnabled = !prefs.zoomEnabled
+            com.omarkallas.inkfield.prefs.GestureAction.ERASER -> {
+                val i = slots.indexOfFirst { it.tool == ToolType.SLICE || it.brush.isMask }
+                if (i >= 0) selectSlot(if (i == activeSlot) lastBrushSlot else i)
+            }
+            else -> uiRequest = a
+        }
+    }
+
+    private fun selectTool() {
+        val i = slots.indexOfFirst { it.tool == ToolType.SELECT }
+        if (i >= 0) { activeSlot = i; prefs.activeSlot = i }
+    }
+
+    fun setArtboard(a: com.omarkallas.inkfield.model.Artboard?) = commit(drawing.copy(artboard = a))
+
+    private var artboardBase: Drawing? = null
+    fun moveArtboardLive(a: com.omarkallas.inkfield.model.Artboard) {
+        if (artboardBase == null) artboardBase = drawing
+        drawing = drawing.copy(artboard = a)
+        version++
+    }
+    fun moveArtboardEnd() {
+        val base = artboardBase ?: return
+        artboardBase = null
+        val moved = drawing
+        drawing = base
+        commit(moved)
+    }
+
     // ---- precision ----
     /** On-canvas grid editing (move/rotate the grid, drag vanishing points). */
     var gridEditing by mutableStateOf(false)

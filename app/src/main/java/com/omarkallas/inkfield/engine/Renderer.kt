@@ -63,13 +63,17 @@ class RenderOptions(
 )
 
 object Renderer {
-    private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
-    private val textPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.SUBPIXEL_TEXT_FLAG)
+    // Paints are per thread so exports can render in the background while the screen draws.
+    private val paintTL = ThreadLocal.withInitial { Paint(Paint.ANTI_ALIAS_FLAG) }
+    private val textPaintTL = ThreadLocal.withInitial { Paint(Paint.ANTI_ALIAS_FLAG or Paint.SUBPIXEL_TEXT_FLAG) }
+    private val paint: Paint get() = paintTL.get()!!
+    private val textPaint: Paint get() = textPaintTL.get()!!
     private val dstOut = PorterDuffXfermode(PorterDuff.Mode.DST_OUT)
     private val dstIn = PorterDuffXfermode(PorterDuff.Mode.DST_IN)
     private var grainShaderSoft: BitmapShader? = null
     private var grainShaderHard: BitmapShader? = null
 
+    @Synchronized
     private fun grainShader(scale: Float, hard: Boolean): BitmapShader {
         val existing = if (hard) grainShaderHard else grainShaderSoft
         if (existing != null) return existing
@@ -105,6 +109,7 @@ object Renderer {
      * translucent wash instead of erasing (they need their layer's offscreen buffer to erase).
      */
     fun drawEntry(canvas: Canvas, e: StrokeCache.Entry, viewScale: Float, alphaMul: Float = 1f, live: Boolean = false) {
+        val paint = this.paint
         val s = e.stroke
         paint.reset()
         paint.isAntiAlias = true

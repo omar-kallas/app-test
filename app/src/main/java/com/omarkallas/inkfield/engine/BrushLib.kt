@@ -163,6 +163,7 @@ object BrushLib {
     // ---- stamps ----
     private val stampCache = HashMap<String, Bitmap>()
 
+    @Synchronized
     fun stamp(b: CustomBrush): Bitmap {
         val key = if (b.stamp == StampShape.IMAGE) "img:${b.image}" else b.stamp.name
         stampCache[key]?.let { return it }
@@ -224,6 +225,7 @@ object BrushLib {
     private var grainBmp: Bitmap? = null
 
     /** A seamless 128×128 alpha noise used by pencils and grain brushes. */
+    @Synchronized
     fun grain(): Bitmap {
         grainBmp?.let { return it }
         val n = 128
