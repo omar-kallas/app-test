@@ -120,6 +120,25 @@ class Prefs(context: Context) {
         get() = sp.getBoolean("layersOpen", true)
         set(v) = sp.edit().putBoolean("layersOpen", v).apply()
 
+    /** Last color mode: "swatch", "hsv" or "rgb". */
+    var colorMode: String
+        get() = sp.getString("colorMode", "swatch") ?: "swatch"
+        set(v) = sp.edit().putString("colorMode", v).apply()
+
+    var swatchRotation: Float
+        get() = sp.getFloat("swatchRot", 0f)
+        set(v) = sp.edit().putFloat("swatchRot", v).apply()
+
+    /** Eyedropper: sample the stroke's own color and opacity (true) or the blended pixel (false). */
+    var eyedropperAlpha: Boolean
+        get() = sp.getBoolean("dropAlpha", true)
+        set(v) = sp.edit().putBoolean("dropAlpha", v).apply()
+
+    /** Eyedropper also copies the touched stroke's brush, size and smoothing. */
+    var eyedropperBrush: Boolean
+        get() = sp.getBoolean("dropBrush", false)
+        set(v) = sp.edit().putBoolean("dropBrush", v).apply()
+
     var defaultPaper: Int
         get() = sp.getInt("paper", 0xFFFFFFFF.toInt())
         set(v) = sp.edit().putInt("paper", v).apply()

@@ -26,6 +26,7 @@ enum class ToolType(val label: String) {
     SLICE("Slice"),
     SELECT("Select"),
     PAN("Pan"),
+    EYEDROPPER("Color picker"),
 }
 
 /**

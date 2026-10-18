@@ -58,12 +58,12 @@ private fun hex(c: Int) = "%06X".format(c and 0xFFFFFF)
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-fun ColorPanel(ctl: EditorController, onClose: () -> Unit) {
+fun ColorPanel(ctl: EditorController, onClose: () -> Unit, onSwatches: () -> Unit, onEyedropper: () -> Unit) {
     val start = remember { argbToHsv(ctl.color) }
     var h by remember { mutableFloatStateOf(start[0]) }
     var s by remember { mutableFloatStateOf(start[1]) }
     var v by remember { mutableFloatStateOf(start[2]) }
-    var rgbMode by remember { mutableStateOf(false) }
+    var rgbMode by remember { mutableStateOf(ctl.prefs.colorMode == "rgb") }
     var hexText by remember { mutableStateOf(hex(ctl.color)) }
 
     fun push(final: Boolean) {
@@ -84,12 +84,13 @@ fun ColorPanel(ctl: EditorController, onClose: () -> Unit) {
     Panel(Modifier.width(300.dp)) {
         Column(Modifier.padding(14.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("Color", fontWeight = FontWeight.SemiBold, color = Ink.text)
-                Spacer(Modifier.width(10.dp))
-                Chip("HSV", !rgbMode) { rgbMode = false }
+                Chip("Swatches", false) { ctl.prefs.colorMode = "swatch"; onSwatches() }
                 Spacer(Modifier.width(6.dp))
-                Chip("RGB", rgbMode) { rgbMode = true }
+                Chip("HSV", !rgbMode) { rgbMode = false; ctl.prefs.colorMode = "hsv" }
+                Spacer(Modifier.width(6.dp))
+                Chip("RGB", rgbMode) { rgbMode = true; ctl.prefs.colorMode = "rgb" }
                 Spacer(Modifier.weight(1f))
+                GlyphButton(Glyph.DROPPER, onEyedropper, size = 32.dp, contentDescription = "Pick a color from the canvas")
                 GlyphButton(Glyph.CLOSE, onClose, size = 32.dp)
             }
             Spacer(Modifier.height(10.dp))

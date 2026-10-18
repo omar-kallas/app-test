@@ -79,7 +79,7 @@ import kotlinx.coroutines.withContext
 import java.io.File
 import kotlin.math.roundToInt
 
-private enum class Overlay { NONE, PROP_SIZE, PROP_OPACITY, PROP_SMOOTHING, COLOR, BRUSHES }
+private enum class Overlay { NONE, PROP_SIZE, PROP_OPACITY, PROP_SMOOTHING, COLOR, SWATCHES, BRUSHES }
 
 suspend fun saveDrawing(ctl: EditorController, repo: Repository) {
     val d = ctl.drawing
@@ -172,6 +172,17 @@ fun EditorScreen(ctl: EditorController, repo: Repository, onExit: () -> Unit) {
             )
         }
 
+        if (ctl.eyedropperArmed) {
+            Panel(Modifier.align(Alignment.TopCenter).statusBarsPadding().padding(top = 72.dp)) {
+                Row(Modifier.padding(start = 14.dp, end = 4.dp, top = 4.dp, bottom = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                    GlyphIcon(Glyph.DROPPER, Ink.text)
+                    Spacer(Modifier.width(8.dp))
+                    Text("Touch the canvas to pick a color", color = Ink.text, fontSize = 14.sp)
+                    GlyphButton(Glyph.CLOSE, { ctl.eyedropperArmed = false }, size = 36.dp, contentDescription = "Cancel")
+                }
+            }
+        }
+
         if (ctl.selection.isNotEmpty()) {
             SelectionBar(ctl, Modifier.align(Alignment.BottomCenter).navigationBarsPadding().padding(bottom = 16.dp))
         }
@@ -180,7 +191,7 @@ fun EditorScreen(ctl: EditorController, repo: Repository, onExit: () -> Unit) {
         ToolWheel(
             ctl = ctl,
             onOpenProp = { k -> overlay = when (k) { PropKind.SIZE -> Overlay.PROP_SIZE; PropKind.OPACITY -> Overlay.PROP_OPACITY; PropKind.SMOOTHING -> Overlay.PROP_SMOOTHING } },
-            onOpenColor = { overlay = Overlay.COLOR },
+            onOpenColor = { overlay = if (ctl.prefs.colorMode == "swatch") Overlay.SWATCHES else Overlay.COLOR },
             onOpenBrushMenu = { brushSlot = it; overlay = Overlay.BRUSHES },
             onDrag = { d -> wheelX = (wx + d.x); wheelY = (wy + d.y) },
             onDragEnd = { ctl.prefs.wheelX = wx; ctl.prefs.wheelY = wy },
@@ -188,7 +199,17 @@ fun EditorScreen(ctl: EditorController, repo: Repository, onExit: () -> Unit) {
         )
 
         // ---- popups anchored to the wheel ----
-        if (overlay != Overlay.NONE) {
+        if (overlay == Overlay.SWATCHES) {
+            // Wheel center: the undo button and its spacer sit left of the wheel.
+            val cx = wx + with(density) { (50.dp + WHEEL_SIZE / 2).toPx() }
+            val cy = wy + wheelH / 2f
+            SwatchWheel(
+                ctl, androidx.compose.ui.geometry.Offset(cx, cy),
+                onClose = { overlay = Overlay.NONE },
+                onMode = { m -> ctl.prefs.colorMode = m; overlay = Overlay.COLOR },
+                onEyedropper = { overlay = Overlay.NONE; ctl.eyedropperArmed = true },
+            )
+        } else if (overlay != Overlay.NONE) {
             Box(Modifier.fillMaxSize().pointerInput(Unit) { detectTapGestures { overlay = Overlay.NONE } })
             val gap = with(density) { 10.dp.toPx() }
             val above = wy + wheelH / 2 > maxH / 2
@@ -209,9 +230,14 @@ fun EditorScreen(ctl: EditorController, repo: Repository, onExit: () -> Unit) {
                     Overlay.PROP_SIZE -> PropPanel(ctl, PropKind.SIZE) { overlay = Overlay.NONE }
                     Overlay.PROP_OPACITY -> PropPanel(ctl, PropKind.OPACITY) { overlay = Overlay.NONE }
                     Overlay.PROP_SMOOTHING -> PropPanel(ctl, PropKind.SMOOTHING) { overlay = Overlay.NONE }
-                    Overlay.COLOR -> ColorPanel(ctl) { overlay = Overlay.NONE }
+                    Overlay.COLOR -> ColorPanel(
+                        ctl,
+                        onClose = { overlay = Overlay.NONE },
+                        onSwatches = { overlay = Overlay.SWATCHES },
+                        onEyedropper = { overlay = Overlay.NONE; ctl.eyedropperArmed = true },
+                    )
                     Overlay.BRUSHES -> BrushMenu(ctl, brushSlot) { overlay = Overlay.NONE }
-                    Overlay.NONE -> {}
+                    Overlay.SWATCHES, Overlay.NONE -> {}
                 }
             }
         }
@@ -355,6 +381,8 @@ private fun SettingsDialog(ctl: EditorController, onDismiss: () -> Unit) {
     var pressure by remember { mutableStateOf(prefs.pressureEnabled) }
     var prediction by remember { mutableStateOf(prefs.predictionEnabled) }
     var highlight by remember { mutableStateOf(prefs.highlightSelection) }
+    var dropAlpha by remember { mutableStateOf(prefs.eyedropperAlpha) }
+    var dropBrush by remember { mutableStateOf(prefs.eyedropperBrush) }
     var hold by remember { mutableFloatStateOf(prefs.holdToSelectMs.toFloat()) }
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -383,6 +411,8 @@ private fun SettingsDialog(ctl: EditorController, onDismiss: () -> Unit) {
                 SettingSwitch("Stylus pressure", pressure) { pressure = it; prefs.pressureEnabled = it }
                 SettingSwitch("Low-latency prediction", prediction) { prediction = it; prefs.predictionEnabled = it }
                 SettingSwitch("Gray out unselected strokes", highlight) { highlight = it; prefs.highlightSelection = it }
+                SettingSwitch("Color picker takes a stroke's own color", dropAlpha) { dropAlpha = it; prefs.eyedropperAlpha = it }
+                SettingSwitch("Color picker also copies the brush", dropBrush) { dropBrush = it; prefs.eyedropperBrush = it }
                 Spacer(Modifier.height(8.dp))
                 Text("Hold to select: ${hold.roundToInt()} ms", fontSize = 14.sp)
                 Slider(

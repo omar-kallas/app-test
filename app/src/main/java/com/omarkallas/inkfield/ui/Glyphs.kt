@@ -21,7 +21,7 @@ import androidx.compose.ui.unit.dp
 /** Monoline icons drawn in code, on a 24-unit grid. */
 enum class Glyph {
     GALLERY, LAYERS, EXPORT, SETTINGS, PAPER, HELP, PLUS, MORE, UNDO, REDO, TRASH, DUPLICATE,
-    FLIP_H, FLIP_V, CHECK, CLOSE, EYE, EYE_OFF, LOCK, UNLOCK, SHARE, RESTORE, PALETTE, PEN,
+    FLIP_H, FLIP_V, CHECK, CLOSE, EYE, EYE_OFF, LOCK, UNLOCK, SHARE, RESTORE, PALETTE, PEN, DROPPER,
 }
 
 @Composable
@@ -76,6 +76,11 @@ fun DrawScope.drawGlyph(g: Glyph, c: Color) {
         Glyph.UNLOCK -> { rrect(5f, 11f, 14f, 10f); path { m(8f, 11f); l(8f, 8f); q(8f, 4f, 12f, 4f); q(15f, 4f, 15.8f, 6.5f) } }
         Glyph.RESTORE -> { path { m(4f, 12f); q(4f, 4f, 12f, 4f); q(20f, 4f, 20f, 12f); q(20f, 20f, 12f, 20f); q(7f, 20f, 5f, 16f) }; path { m(2f, 9f); l(4f, 12f); l(7f, 10f) } }
         Glyph.PALETTE -> { circle(12f, 12f, 8.5f); circle(9f, 9f, 1.4f, true); circle(14.5f, 8f, 1.4f, true); circle(16.5f, 12.5f, 1.4f, true); circle(10f, 15f, 1.8f, true) }
+        Glyph.DROPPER -> {
+            path { m(14f, 4.5f); l(19.5f, 10f) }
+            path { m(16.5f, 7f); l(7f, 16.5f); l(5f, 21f); l(4f, 20f); l(7.5f, 17f) }
+            path { m(15f, 3f); q(17f, 1.5f, 19f, 3.5f); q(21f, 5.5f, 19.5f, 7.5f); l(17.5f, 9.5f) }
+        }
         Glyph.PEN -> { path { m(5f, 19f); l(6f, 15f); l(16f, 5f); l(19f, 8f); l(9f, 18f); close() }; line(14f, 7f, 17f, 10f) }
     }
 }

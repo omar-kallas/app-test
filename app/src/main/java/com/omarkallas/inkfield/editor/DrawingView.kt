@@ -40,7 +40,7 @@ import kotlin.math.roundToInt
 @SuppressLint("ViewConstructor")
 class DrawingView(context: Context, private val ctl: EditorController) : View(context) {
 
-    private enum class Mode { NONE, DRAW, NAVIGATE, LASSO, SLICE, SEL_MOVE, SEL_SCALE, SEL_ROTATE, SEL_PINCH, IGNORE }
+    private enum class Mode { NONE, DRAW, NAVIGATE, LASSO, SLICE, SEL_MOVE, SEL_SCALE, SEL_ROTATE, SEL_PINCH, EYEDROP, IGNORE }
 
     private val density = resources.displayMetrics.density
     private val touchSlop = ViewConfiguration.get(context).scaledTouchSlop.toFloat()
@@ -192,6 +192,7 @@ class DrawingView(context: Context, private val ctl: EditorController) : View(co
 
         if (sel.isNotEmpty()) drawSelectionOverlay(canvas)
         if (mode == Mode.LASSO && lassoCount >= 2) drawLasso(canvas)
+        if (mode == Mode.EYEDROP) drawLoupe(canvas)
         if (mode == Mode.SLICE && cursor.x >= 0f) {
             overlayPaint.style = Paint.Style.STROKE
             overlayPaint.strokeWidth = 1.5f * density
@@ -346,6 +347,10 @@ class DrawingView(context: Context, private val ctl: EditorController) : View(co
             startNavigate(e); return
         }
 
+        if (ctl.eyedropperArmed || (ctl.activeTool == ToolType.EYEDROPPER && (stylus || mouse || fingersDraw()))) {
+            startEyedrop(e.x, e.y); return
+        }
+
         // A drag starting on the selection box moves, scales or rotates it.
         if (ctl.selection.isNotEmpty() && startSelectionDrag(e.x, e.y)) return
 
@@ -362,6 +367,7 @@ class DrawingView(context: Context, private val ctl: EditorController) : View(co
             ToolType.SLICE -> startSlice(e)
             ToolType.SELECT -> startLasso(e.x, e.y)
             ToolType.PAN -> startNavigate(e)
+            ToolType.EYEDROPPER -> startEyedrop(e.x, e.y)
         }
     }
 
@@ -417,6 +423,7 @@ class DrawingView(context: Context, private val ctl: EditorController) : View(co
             Mode.SLICE -> sliceMove(e, idx)
             Mode.SEL_MOVE, Mode.SEL_SCALE, Mode.SEL_ROTATE -> selDrag(e.getX(idx), e.getY(idx))
             Mode.SEL_PINCH -> selPinch(e)
+            Mode.EYEDROP -> { sampleAt(e.getX(idx), e.getY(idx)); invalidate() }
             else -> {}
         }
     }
@@ -446,6 +453,7 @@ class DrawingView(context: Context, private val ctl: EditorController) : View(co
                 else if (quick && gestureMaxPointers == 1 && ctl.selection.isNotEmpty()) ctl.clearSelection()
             }
             Mode.SEL_MOVE, Mode.SEL_SCALE, Mode.SEL_ROTATE, Mode.SEL_PINCH -> commitSelectionTransform()
+            Mode.EYEDROP -> finishEyedrop()
             Mode.IGNORE -> {
                 val quick = e.eventTime - gestureStartTime < 350 && !gestureMoved
                 if (!gestureFromStylus && quick && gestureMaxPointers == 2) ctl.undo()
@@ -467,6 +475,7 @@ class DrawingView(context: Context, private val ctl: EditorController) : View(co
             Mode.SLICE -> ctl.sliceEnd()
             Mode.SEL_MOVE, Mode.SEL_SCALE, Mode.SEL_ROTATE, Mode.SEL_PINCH -> { selMatrix.reset(); selHasTransform = false }
             Mode.NAVIGATE -> ctl.setViewport(currentViewport())
+            Mode.EYEDROP -> { dropSnapshot?.recycle(); dropSnapshot = null }
             else -> {}
         }
         lassoCount = 0
@@ -806,5 +815,79 @@ class DrawingView(context: Context, private val ctl: EditorController) : View(co
         selMatrix.reset()
         selHasTransform = false
         invalidate()
+    }
+
+    // ---- eyedropper ----
+    private var dropSnapshot: android.graphics.Bitmap? = null
+    private var dropColor = 0
+    private var dropStroke: Stroke? = null
+    private val dropPoint = PointF()
+
+    private fun startEyedrop(x: Float, y: Float) {
+        cancelHold()
+        mode = Mode.EYEDROP
+        // Render the canvas alone (no overlays) so blended pixels can be sampled.
+        dropSnapshot?.recycle()
+        dropSnapshot = runCatching {
+            val bmp = android.graphics.Bitmap.createBitmap(width.coerceAtLeast(1), height.coerceAtLeast(1), android.graphics.Bitmap.Config.ARGB_8888)
+            val c = Canvas(bmp)
+            c.drawColor(ctl.drawing.background)
+            c.concat(view)
+            Renderer.drawStrokes(c, ctl.drawing, ctl.cache, RenderOptions(scaleOf(view)))
+            bmp
+        }.getOrNull()
+        sampleAt(x, y)
+        invalidate()
+    }
+
+    private fun sampleAt(x: Float, y: Float) {
+        dropPoint.set(x, y)
+        val p = PointF()
+        toCanvas(x, y, p)
+        val hit = EditOps.pick(ctl.drawing, ctl.cache, p.x, p.y, 3f * density / scaleOf(view))
+        dropStroke = hit
+        val pixel = dropSnapshot?.let { b ->
+            val px = x.roundToInt().coerceIn(0, b.width - 1)
+            val py = y.roundToInt().coerceIn(0, b.height - 1)
+            b.getPixel(px, py) or 0xFF000000.toInt()
+        } ?: ctl.drawing.background
+        dropColor = if (ctl.prefs.eyedropperAlpha && hit != null) hit.color else pixel
+    }
+
+    private fun finishEyedrop() {
+        ctl.applyEyedrop(dropColor, dropStroke)
+        dropSnapshot?.recycle()
+        dropSnapshot = null
+        dropStroke = null
+    }
+
+    /** Ring above the finger: top half is the sampled color, bottom half the current one. */
+    private fun drawLoupe(canvas: Canvas) {
+        val cx = dropPoint.x
+        val cy = (dropPoint.y - 70f * density).coerceAtLeast(50f * density)
+        val rOut = 44f * density
+        val rIn = 28f * density
+        val oval = RectF(cx - (rOut + rIn) / 2f, cy - (rOut + rIn) / 2f, cx + (rOut + rIn) / 2f, cy + (rOut + rIn) / 2f)
+        overlayPaint.pathEffect = null
+        overlayPaint.style = Paint.Style.STROKE
+        overlayPaint.strokeWidth = rOut - rIn
+        overlayPaint.color = dropColor or 0xFF000000.toInt()
+        canvas.drawArc(oval, 180f, 180f, false, overlayPaint)
+        overlayPaint.color = ctl.color or 0xFF000000.toInt()
+        canvas.drawArc(oval, 0f, 180f, false, overlayPaint)
+        overlayPaint.strokeWidth = 1.2f * density
+        overlayPaint.color = 0x66000000
+        canvas.drawCircle(cx, cy, rOut, overlayPaint)
+        canvas.drawCircle(cx, cy, rIn, overlayPaint)
+        // crosshair at the sample point
+        val r = 9f * density
+        overlayPaint.color = Color.WHITE
+        overlayPaint.strokeWidth = 3f * density
+        canvas.drawLine(dropPoint.x - r, dropPoint.y, dropPoint.x + r, dropPoint.y, overlayPaint)
+        canvas.drawLine(dropPoint.x, dropPoint.y - r, dropPoint.x, dropPoint.y + r, overlayPaint)
+        overlayPaint.color = Color.BLACK
+        overlayPaint.strokeWidth = 1.2f * density
+        canvas.drawLine(dropPoint.x - r, dropPoint.y, dropPoint.x + r, dropPoint.y, overlayPaint)
+        canvas.drawLine(dropPoint.x, dropPoint.y - r, dropPoint.x, dropPoint.y + r, overlayPaint)
     }
 }

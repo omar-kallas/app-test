@@ -61,6 +61,25 @@ class EditorController(initial: Drawing, val prefs: Prefs) {
     var partialLasso by mutableStateOf(prefs.partialLasso)
     var selectionScaleWidths by mutableStateOf(true)
 
+    /** The next canvas touch picks a color instead of drawing. */
+    var eyedropperArmed by mutableStateOf(false)
+
+    /** Applies an eyedropper result: the color, plus the stroke's brush settings when that option is on. */
+    fun applyEyedrop(color: Int, stroke: Stroke?) {
+        setColor(color, applyToSelection = false)
+        if (stroke != null && prefs.eyedropperBrush) {
+            val i = if (slot.tool == ToolType.BRUSH) activeSlot else lastBrushSlot
+            if (i in slots.indices && slots[i].tool == ToolType.BRUSH) {
+                updateSlot(i, slots[i].copy(brush = stroke.brush, size = stroke.size, opacity = stroke.opacity, smoothing = stroke.smoothing))
+            }
+        }
+        eyedropperArmed = false
+        if (slot.tool == ToolType.EYEDROPPER && lastBrushSlot in slots.indices) selectSlot(lastBrushSlot)
+    }
+
+    /** Most recently used brush slot, so the eyedropper can hand back to it. */
+    private var lastBrushSlot = 0
+
     // ---- view readouts (written by the canvas each frame) ----
     var zoomReadout by mutableFloatStateOf(initial.viewport.scale)
     var rotationReadout by mutableFloatStateOf(initial.viewport.rotation)
@@ -243,6 +262,8 @@ class EditorController(initial: Drawing, val prefs: Prefs) {
     fun selectSlot(i: Int) {
         if (i !in slots.indices) return
         if (slots[i].tool != ToolType.SELECT) clearSelection()
+        if (slots[activeSlot].tool == ToolType.BRUSH) lastBrushSlot = activeSlot
+        if (slots[i].tool == ToolType.BRUSH) lastBrushSlot = i
         activeSlot = i
         prefs.activeSlot = i
     }

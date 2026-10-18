@@ -208,6 +208,12 @@ fun DrawScope.drawSlotGlyph(slot: ToolSlot, c: Offset, r: Float, color: Color) {
             }
             drawPath(p, ink, style = Stroke(r * 0.14f, cap = StrokeCap.Round, pathEffect = PathEffect.dashPathEffect(floatArrayOf(r * 0.3f, r * 0.22f))))
         }
+        ToolType.EYEDROPPER -> {
+            val w = r * 0.14f
+            drawLine(ink, Offset(c.x - r * 0.75f, c.y + r * 0.75f), Offset(c.x + r * 0.35f, c.y - r * 0.35f), w * 1.6f, StrokeCap.Round)
+            drawCircle(ink, r * 0.32f, Offset(c.x + r * 0.52f, c.y - r * 0.52f))
+            drawCircle(color, r * 0.18f, Offset(c.x - r * 0.75f, c.y + r * 0.75f))
+        }
         ToolType.PAN -> {
             val w = r * 0.14f
             drawLine(ink, Offset(c.x - r, c.y), Offset(c.x + r, c.y), w, StrokeCap.Round)
@@ -355,7 +361,7 @@ fun BrushMenu(ctl: EditorController, slotIndex: Int, onClose: () -> Unit) {
                 }
             }
             Text("Tools", color = Ink.muted, fontSize = 12.sp, modifier = Modifier.padding(start = 14.dp, top = 8.dp, bottom = 2.dp))
-            listOf(ToolType.SLICE to "Slice (eraser)", ToolType.SELECT to "Select (lasso)", ToolType.PAN to "Pan").forEach { (t, label) ->
+            listOf(ToolType.SLICE to "Slice (eraser)", ToolType.SELECT to "Select (lasso)", ToolType.EYEDROPPER to "Color picker", ToolType.PAN to "Pan").forEach { (t, label) ->
                 MenuRow(slot.tool == t, {
                     if (slot.tool != t) ctlSetTool(ctl, slotIndex, t)
                     onClose()
