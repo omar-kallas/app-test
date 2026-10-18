@@ -123,6 +123,10 @@ fun EditorScreen(ctl: EditorController, repo: Repository, onExit: () -> Unit) {
     var showExport by remember { mutableStateOf(false) }
     var showSettings by remember { mutableStateOf(false) }
     var showHelp by remember { mutableStateOf(false) }
+    var precisionOpen by remember { mutableStateOf(ctl.prefs.precisionOpen) }
+    var precisionSection by remember { mutableStateOf<PrecisionSection?>(null) }
+    var showMeasure by remember { mutableStateOf(false) }
+    var showScaleFrom by remember { mutableStateOf(false) }
 
     BoxWithConstraints(Modifier.fillMaxSize().background(Color(ctl.drawing.background))) {
         val maxW = with(density) { maxWidth.toPx() }
@@ -142,7 +146,7 @@ fun EditorScreen(ctl: EditorController, repo: Repository, onExit: () -> Unit) {
             modifier = Modifier.fillMaxSize(),
             update = { v ->
                 // Reading these states re-runs update when they change.
-                ctl.version; ctl.selection; ctl.slot; ctl.color
+                ctl.version; ctl.selection; ctl.slot; ctl.color; ctl.gridEditing; ctl.eyedropperArmed
                 v.invalidate()
             },
         )
@@ -158,12 +162,51 @@ fun EditorScreen(ctl: EditorController, repo: Repository, onExit: () -> Unit) {
             onGallery = exit,
             onRename = { renameDrawing = true },
             onToggleLayers = { layersOpen = !layersOpen; ctl.prefs.layersOpen = layersOpen },
+            precisionOpen = precisionOpen,
+            onTogglePrecision = { precisionOpen = !precisionOpen; ctl.prefs.precisionOpen = precisionOpen; if (!precisionOpen) precisionSection = null },
+            onMeasureSelection = { showMeasure = true },
             onPaper = { showPaper = true },
             onExport = { showExport = true },
             onSettings = { showSettings = true },
             onHelp = { showHelp = true },
             modifier = Modifier.align(Alignment.TopCenter).statusBarsPadding(),
         )
+
+        val newGuide: (com.omarkallas.inkfield.model.GuideType) -> Unit = { t ->
+            val c = viewRef.value?.viewCenterCanvas() ?: floatArrayOf(0f, 0f, 100f)
+            ctl.updatePrecision {
+                it.copy(guideOn = true, guideType = t, guide = com.omarkallas.inkfield.engine.Guides.create(t, c[0], c[1], c[2]))
+            }
+        }
+        if (precisionOpen) {
+            PrecisionPanel(
+                ctl, precisionSection, onOpen = { s -> precisionSection = if (precisionSection == s) null else s },
+                onNewGuide = { newGuide(ctl.drawing.precision.guideType) },
+                modifier = Modifier.align(Alignment.TopStart).statusBarsPadding().padding(top = 64.dp, start = 12.dp),
+            )
+            precisionSection?.let { sec ->
+                Box(
+                    Modifier.align(Alignment.TopStart).statusBarsPadding().padding(top = 64.dp, start = 216.dp),
+                ) {
+                    PrecisionOptions(
+                        ctl, sec,
+                        onClose = { precisionSection = null },
+                        onEditGrid = { ctl.updatePrecision { it.copy(gridOn = true) }; ctl.gridEditing = true; precisionSection = null },
+                        onScaleFromSelection = { showScaleFrom = true },
+                        onNewGuide = { t -> newGuide(t) },
+                    )
+                }
+            }
+        }
+        if (ctl.gridEditing) {
+            Panel(Modifier.align(Alignment.TopCenter).statusBarsPadding().padding(top = 72.dp)) {
+                Row(Modifier.padding(start = 14.dp, end = 4.dp, top = 4.dp, bottom = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Text("Editing grid: drag the handles", color = Ink.text, fontSize = 14.sp)
+                    Spacer(Modifier.width(8.dp))
+                    androidx.compose.material3.TextButton(onClick = { ctl.gridEditing = false }) { Text("Done") }
+                }
+            }
+        }
 
         if (layersOpen) {
             LayersPanel(
@@ -251,6 +294,8 @@ fun EditorScreen(ctl: EditorController, repo: Repository, onExit: () -> Unit) {
         TextDialog("Rename layer", l.name, onDismiss = { renameLayer = null }) { ctl.renameLayer(l.id, it) }
     }
     if (showPaper) PaperDialog(ctl) { showPaper = false }
+    if (showMeasure) MeasurementDialog(ctl) { showMeasure = false }
+    if (showScaleFrom) ScaleFromSelectionDialog(ctl) { showScaleFrom = false }
     if (showSettings) SettingsDialog(ctl) { showSettings = false }
     if (showHelp) HelpDialog { showHelp = false }
     if (showExport) ExportDialog(ctl) { showExport = false }
@@ -263,6 +308,9 @@ private fun StatusBar(
     onGallery: () -> Unit,
     onRename: () -> Unit,
     onToggleLayers: () -> Unit,
+    precisionOpen: Boolean,
+    onTogglePrecision: () -> Unit,
+    onMeasureSelection: () -> Unit,
     onPaper: () -> Unit,
     onExport: () -> Unit,
     onSettings: () -> Unit,
@@ -278,17 +326,35 @@ private fun StatusBar(
                 modifier = Modifier.padding(horizontal = 8.dp).weight(1f, fill = false).clickable(onClick = onRename),
             )
             Spacer(Modifier.weight(1f))
-            val zoom = (ctl.zoomReadout * 100).roundToInt()
-            var rot = ctl.rotationReadout.roundToInt() % 360
-            if (rot < 0) rot += 360
-            Text(
-                "$zoom% · $rot°",
-                color = Ink.muted, fontSize = 13.sp,
-                modifier = Modifier
-                    .clip(RoundedCornerShape(8.dp))
-                    .pointerInput(Unit) { detectTapGestures(onDoubleTap = { ctl.resetViewRequest++ }) }
-                    .padding(horizontal = 8.dp, vertical = 6.dp),
-            )
+            val pre = ctl.drawing.precision
+            val selBounds = if (ctl.selection.isNotEmpty()) ctl.selectionBounds() else null
+            if (selBounds != null && pre.measureOn) {
+                // With a selection and Measure on, the readout shows its size; tap to type exact values.
+                Text(
+                    com.omarkallas.inkfield.engine.Units.length(selBounds.width(), pre.measure) + " × " +
+                        com.omarkallas.inkfield.engine.Units.length(selBounds.height(), pre.measure),
+                    color = Ink.accent, fontSize = 13.sp,
+                    modifier = Modifier.clip(RoundedCornerShape(8.dp)).clickable(onClick = onMeasureSelection).padding(horizontal = 8.dp, vertical = 6.dp),
+                )
+            } else {
+                val zoom = (ctl.zoomReadout * 100).roundToInt()
+                var rot = ctl.rotationReadout.roundToInt() % 360
+                if (rot < 0) rot += 360
+                Text(
+                    "$zoom% · $rot°",
+                    color = Ink.muted, fontSize = 13.sp,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(8.dp))
+                        .pointerInput(Unit) {
+                            detectTapGestures(
+                                onTap = { if (ctl.selection.isNotEmpty()) onMeasureSelection() },
+                                onDoubleTap = { ctl.resetViewRequest++ },
+                            )
+                        }
+                        .padding(horizontal = 8.dp, vertical = 6.dp),
+                )
+            }
+            GlyphButton(Glyph.RULER, onTogglePrecision, active = precisionOpen, contentDescription = "Precision")
             GlyphButton(Glyph.LAYERS, onToggleLayers, active = layersOpen, contentDescription = "Layers")
             GlyphButton(Glyph.PAPER, onPaper, contentDescription = "Paper")
             GlyphButton(Glyph.EXPORT, onExport, contentDescription = "Export")
@@ -448,6 +514,11 @@ private fun HelpDialog(onDismiss: () -> Unit) {
         "Slice" to "Cuts through strokes where you drag. The pen's eraser end slices too.",
         "Layers" to "Auto mode puts each tool family on its own layer. Tap a layer to make it active; tap it again for options.",
         "Smoothing" to "0% keeps your raw line, 50% removes most wobble, 100% turns the stroke into a straight line.",
+        "Precision" to "The ruler button opens grids, snapping, measurement, shape guides and shape recognition. Tick a row to turn it on; tap its name for options.",
+        "Grids and snapping" to "Pick a grid (including 1-, 2- and 3-point perspective). With Snap on, strokes straighten along the grid; Align keeps grid directions but lets lines start anywhere. 'Move / rotate on canvas' lets you drag the grid or its vanishing points.",
+        "Shape guides" to "A gray template that anything you draw follows: line, arc, angle, ellipse or rectangle. Drag its handles; double-tap its cross for a perfect version.",
+        "Shapes" to "Draw a rough line, arc, triangle, rectangle or circle and hold the pen still: it turns into a clean shape. Keep moving to scale and rotate it.",
+        "Measure" to "Strokes drawn with Measure on show their length. Set units and a drawing scale (like 1:100), or set the scale from a line of known length. With a selection, tap its size in the top bar to type exact dimensions.",
         "Saving" to "Drawings save automatically. Deleted drawings stay in Recently Deleted for 30 days.",
     )
     AlertDialog(

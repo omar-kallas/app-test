@@ -159,14 +159,57 @@ class EditorController(initial: Drawing, val prefs: Prefs) {
         return d.copy(layers = d.layers + layer, activeLayerId = id, nextId = id + 1) to id
     }
 
-    fun addStroke(brush: BrushType, pts: FloatArray) {
+    // ---- precision ----
+    /** On-canvas grid editing (move/rotate the grid, drag vanishing points). */
+    var gridEditing by mutableStateOf(false)
+
+    /** Precision settings change without an undo step. */
+    fun setPrecision(p: com.omarkallas.inkfield.model.Precision) {
+        if (p == drawing.precision) return
+        drawing = drawing.copy(precision = p)
+        version++
+    }
+
+    fun updatePrecision(f: (com.omarkallas.inkfield.model.Precision) -> com.omarkallas.inkfield.model.Precision) =
+        setPrecision(f(drawing.precision))
+
+    /** Scales the selection so its bounds become [w]×[h] canvas units (about the top-left corner). */
+    fun resizeSelection(w: Float, h: Float) {
+        val b = selectionBounds() ?: return
+        if (b.width() < 1e-3f || b.height() < 1e-3f) return
+        val m = Matrix().apply { setScale(w / b.width(), h / b.height(), b.left, b.top) }
+        val uniform = kotlin.math.abs(w / b.width() - h / b.height()) < 1e-3f
+        val keep = selectionScaleWidths
+        if (!uniform) selectionScaleWidths = false
+        transformSelection(m)
+        selectionScaleWidths = keep
+    }
+
+    fun rotateSelection(deg: Float) {
+        val b = selectionBounds() ?: return
+        transformSelection(Matrix().apply { setRotate(deg, b.centerX(), b.centerY()) })
+    }
+
+    /** Sets the drawing scale so that the selected stroke's length equals [realPoints] real points. */
+    fun setScaleFromSelection(realPoints: Double): Boolean {
+        val s = selectedStrokes().singleOrNull() ?: return false
+        val pr = cache.get(s).processed
+        var len = 0f
+        for (i in 1 until pr.n) len += kotlin.math.hypot(pr.x[i] - pr.x[i - 1], pr.y[i] - pr.y[i - 1])
+        if (len < 1e-3f || realPoints <= 0.0) return false
+        updatePrecision { it.copy(measure = it.measure.copy(scale = realPoints / len)) }
+        return true
+    }
+
+    fun addStroke(brush: BrushType, pts: FloatArray, smoothing: Float? = null, measured: Boolean = false) {
         if (pts.size < Stroke.STRIDE) return
         val (d, layerId) = targetLayer(drawing, brush)
         val layer = d.layer(layerId)
         if (layer != null && layer.locked) return
         val s = Stroke(
             id = d.nextId, brush = brush, size = slot.size, color = color,
-            opacity = slot.opacity, smoothing = slot.smoothing, layerId = layerId, pts = pts,
+            opacity = slot.opacity, smoothing = smoothing ?: slot.smoothing, layerId = layerId, pts = pts,
+            measured = measured,
         )
         // Show a hidden target layer rather than drawing invisibly.
         val layers = d.layers.map { if (it.id == layerId && !it.visible) it.copy(visible = true) else it }

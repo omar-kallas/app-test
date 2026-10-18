@@ -45,6 +45,8 @@ class Stroke(
     val smoothing: Float,    // 0..1
     val layerId: Long,
     val pts: FloatArray,
+    /** Show this stroke's length (drawn while Measure was on). */
+    val measured: Boolean = false,
 ) {
     val count: Int get() = pts.size / STRIDE
 
@@ -57,7 +59,8 @@ class Stroke(
         smoothing: Float = this.smoothing,
         layerId: Long = this.layerId,
         pts: FloatArray = this.pts,
-    ) = Stroke(id, brush, size, color, opacity, smoothing, layerId, pts)
+        measured: Boolean = this.measured,
+    ) = Stroke(id, brush, size, color, opacity, smoothing, layerId, pts, measured)
 
     companion object {
         const val STRIDE = 4
@@ -98,6 +101,7 @@ data class Drawing(
     val strokes: List<Stroke> = emptyList(),
     val viewport: Viewport = Viewport(),
     val nextId: Long = 1000,
+    val precision: Precision = Precision(),
 ) {
     fun layer(id: Long): Layer? = layers.firstOrNull { it.id == id }
     val activeLayer: Layer get() = layer(activeLayerId) ?: layers.last()

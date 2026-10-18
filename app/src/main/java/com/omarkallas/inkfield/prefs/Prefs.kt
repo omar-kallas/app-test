@@ -139,6 +139,10 @@ class Prefs(context: Context) {
         get() = sp.getBoolean("dropBrush", false)
         set(v) = sp.edit().putBoolean("dropBrush", v).apply()
 
+    var precisionOpen: Boolean
+        get() = sp.getBoolean("precisionOpen", false)
+        set(v) = sp.edit().putBoolean("precisionOpen", v).apply()
+
     var defaultPaper: Int
         get() = sp.getInt("paper", 0xFFFFFFFF.toInt())
         set(v) = sp.edit().putInt("paper", v).apply()

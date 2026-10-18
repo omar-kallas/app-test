@@ -17,6 +17,14 @@ import android.view.ViewConfiguration
 import androidx.input.motionprediction.MotionEventPredictor
 import com.omarkallas.inkfield.engine.EditOps
 import com.omarkallas.inkfield.engine.Geometry
+import com.omarkallas.inkfield.engine.Grid
+import com.omarkallas.inkfield.engine.GuideHandle
+import com.omarkallas.inkfield.engine.Guides
+import com.omarkallas.inkfield.engine.Recognize
+import com.omarkallas.inkfield.engine.Snap
+import com.omarkallas.inkfield.engine.Units
+import com.omarkallas.inkfield.model.Guide
+import com.omarkallas.inkfield.model.Pt
 import com.omarkallas.inkfield.engine.RenderOptions
 import com.omarkallas.inkfield.engine.Renderer
 import com.omarkallas.inkfield.engine.StrokeCache
@@ -40,7 +48,7 @@ import kotlin.math.roundToInt
 @SuppressLint("ViewConstructor")
 class DrawingView(context: Context, private val ctl: EditorController) : View(context) {
 
-    private enum class Mode { NONE, DRAW, NAVIGATE, LASSO, SLICE, SEL_MOVE, SEL_SCALE, SEL_ROTATE, SEL_PINCH, EYEDROP, IGNORE }
+    private enum class Mode { NONE, DRAW, NAVIGATE, LASSO, SLICE, SEL_MOVE, SEL_SCALE, SEL_ROTATE, SEL_PINCH, EYEDROP, GUIDE_EDIT, GRID_EDIT, IGNORE }
 
     private val density = resources.displayMetrics.density
     private val touchSlop = ViewConfiguration.get(context).scaledTouchSlop.toFloat()
@@ -146,6 +154,13 @@ class DrawingView(context: Context, private val ctl: EditorController) : View(co
         ctl.rotationReadout = rotationOf(view)
     }
 
+    /** Canvas point at the view center and the canvas length of 100 dp, for placing new guides. */
+    fun viewCenterCanvas(): FloatArray {
+        val p = PointF()
+        toCanvas(width / 2f, height / 2f, p)
+        return floatArrayOf(p.x, p.y, 100f * density / scaleOf(view))
+    }
+
     /** Return to 100% and 0° with the content (or the origin) centered. */
     fun resetView() {
         val b = Renderer.contentBounds(ctl.drawing, ctl.cache)
@@ -183,12 +198,19 @@ class DrawingView(context: Context, private val ctl: EditorController) : View(co
         val highlight = if (sel.isNotEmpty() && ctl.prefs.highlightSelection) sel else null
         val skip = if (sel.isNotEmpty() && selHasTransform) sel else null
 
+        val pre = d.precision
         canvas.save()
         canvas.concat(view)
+        if (pre.gridOn) Grid.draw(canvas, pre.grid, visible, scale, isDarkPaper(), density)
         Renderer.drawStrokes(canvas, d, ctl.cache, RenderOptions(scale, visible, highlight, skip))
         if (skip != null) Renderer.drawTransformed(canvas, ctl.selectedStrokes(), ctl.cache, selMatrix, scale, d)
+        activeGuide()?.let { drawGuideTemplate(canvas, it, scale, visible) }
         if (mode == Mode.DRAW && liveCount > 0) drawLive(canvas, scale)
         canvas.restore()
+
+        if (pre.measureOn) drawMeasureLabels(canvas, visible)
+        activeGuide()?.let { drawGuideHandles(canvas, it) }
+        if (ctl.gridEditing && pre.gridOn) drawGridHandles(canvas)
 
         if (sel.isNotEmpty()) drawSelectionOverlay(canvas)
         if (mode == Mode.LASSO && lassoCount >= 2) drawLasso(canvas)
@@ -203,12 +225,10 @@ class DrawingView(context: Context, private val ctl: EditorController) : View(co
     }
 
     private fun drawLive(canvas: Canvas, scale: Float) {
-        val total = liveCount + livePredictedCount
-        val pts = FloatArray(total * Stroke.STRIDE)
-        System.arraycopy(live, 0, pts, 0, liveCount * Stroke.STRIDE)
-        if (livePredictedCount > 0) System.arraycopy(livePredicted, 0, pts, liveCount * Stroke.STRIDE, livePredictedCount * Stroke.STRIDE)
+        val (pts, sm) = finalLivePoints(includePredicted = true)
+        if (pts.isEmpty()) return
         val slot = ctl.slot
-        val s = Stroke(-1, liveBrush, slot.size, ctl.color, slot.opacity, slot.smoothing, -1, pts)
+        val s = Stroke(-1, liveBrush, slot.size, ctl.color, slot.opacity, sm ?: slot.smoothing, -1, pts)
         val pr = Geometry.process(s)
         val entry = StrokeCache.Entry(s, pr, Geometry.buildPath(s, pr))
         Renderer.drawEntry(canvas, entry, scale)
@@ -351,6 +371,12 @@ class DrawingView(context: Context, private val ctl: EditorController) : View(co
             startEyedrop(e.x, e.y); return
         }
 
+        if (ctl.gridEditing) {
+            if (startGridEdit(e.x, e.y)) return
+            ctl.gridEditing = false // tapping elsewhere leaves grid editing
+        }
+        if (startGuideEdit(e.x, e.y, e.eventTime)) return
+
         // A drag starting on the selection box moves, scales or rotates it.
         if (ctl.selection.isNotEmpty() && startSelectionDrag(e.x, e.y)) return
 
@@ -424,6 +450,8 @@ class DrawingView(context: Context, private val ctl: EditorController) : View(co
             Mode.SEL_MOVE, Mode.SEL_SCALE, Mode.SEL_ROTATE -> selDrag(e.getX(idx), e.getY(idx))
             Mode.SEL_PINCH -> selPinch(e)
             Mode.EYEDROP -> { sampleAt(e.getX(idx), e.getY(idx)); invalidate() }
+            Mode.GUIDE_EDIT -> guideDrag(e.getX(idx), e.getY(idx))
+            Mode.GRID_EDIT -> gridDrag(e.getX(idx), e.getY(idx))
             else -> {}
         }
     }
@@ -454,6 +482,7 @@ class DrawingView(context: Context, private val ctl: EditorController) : View(co
             }
             Mode.SEL_MOVE, Mode.SEL_SCALE, Mode.SEL_ROTATE, Mode.SEL_PINCH -> commitSelectionTransform()
             Mode.EYEDROP -> finishEyedrop()
+            Mode.GUIDE_EDIT, Mode.GRID_EDIT -> { editGuideStart = null; editGridStart = null }
             Mode.IGNORE -> {
                 val quick = e.eventTime - gestureStartTime < 350 && !gestureMoved
                 if (!gestureFromStylus && quick && gestureMaxPointers == 2) ctl.undo()
@@ -471,7 +500,7 @@ class DrawingView(context: Context, private val ctl: EditorController) : View(co
     private fun cancelGesture() {
         cancelHold()
         when (mode) {
-            Mode.DRAW -> discardLive()
+            Mode.DRAW -> { cancelRecognition(); recognized = null; discardLive() }
             Mode.SLICE -> ctl.sliceEnd()
             Mode.SEL_MOVE, Mode.SEL_SCALE, Mode.SEL_ROTATE, Mode.SEL_PINCH -> { selMatrix.reset(); selHasTransform = false }
             Mode.NAVIGATE -> ctl.setViewport(currentViewport())
@@ -489,8 +518,17 @@ class DrawingView(context: Context, private val ctl: EditorController) : View(co
             Mode.DRAW -> {
                 addLive(e, idx)
                 livePredictedCount = 0
-                if (liveCount > 0) ctl.addStroke(liveBrush, live.copyOf(liveCount * Stroke.STRIDE))
+                cancelRecognition()
+                if (liveCount > 0) {
+                    var (pts, sm) = finalLivePoints(includePredicted = false)
+                    val pre = ctl.drawing.precision
+                    if (pre.snapOn && pre.snap.autoComplete && recognized == null) {
+                        pts = Snap.autoComplete(pts, nearbyEnds(), 14f * density / scaleOf(view))
+                    }
+                    ctl.addStroke(liveBrush, pts, sm, measured = pre.measureOn)
+                }
                 liveCount = 0
+                recognized = null
             }
             Mode.SLICE -> ctl.sliceEnd()
             Mode.LASSO -> finishLasso()
@@ -546,6 +584,13 @@ class DrawingView(context: Context, private val ctl: EditorController) : View(co
 
     private fun addLive(e: MotionEvent, idx: Int) {
         if (idx < 0 || idx >= e.pointerCount) return
+        if (recognized != null) {
+            // After recognition, keeping the pen down scales and rotates the shape.
+            val p = PointF(); toCanvas(e.getX(idx), e.getY(idx), p)
+            transformRecognized(p.x, p.y)
+            return
+        }
+        armRecognition(e.getX(idx), e.getY(idx))
         for (h in 0 until e.historySize) {
             appendSample(e.getHistoricalX(idx, h), e.getHistoricalY(idx, h), pressureOf(e, idx, h), e.getHistoricalEventTime(h))
         }
@@ -572,6 +617,7 @@ class DrawingView(context: Context, private val ctl: EditorController) : View(co
     private val sampleTmp = PointF()
     private fun appendSample(sx: Float, sy: Float, p: Float, time: Long) {
         toCanvas(sx, sy, sampleTmp)
+        activeGuide()?.let { g -> val q = Guides.project(g, sampleTmp.x, sampleTmp.y); sampleTmp.set(q.x, q.y) }
         val st = Stroke.STRIDE
         if (liveCount > 0) {
             val lx = live[(liveCount - 1) * st]; val ly = live[(liveCount - 1) * st + 1]
@@ -584,6 +630,8 @@ class DrawingView(context: Context, private val ctl: EditorController) : View(co
     }
 
     private fun discardLive() {
+        cancelRecognition()
+        recognized = null
         liveCount = 0
         livePredictedCount = 0
         if (mode == Mode.DRAW) mode = Mode.NONE
@@ -753,7 +801,10 @@ class DrawingView(context: Context, private val ctl: EditorController) : View(co
         toCanvas(x, y, p)
         selMatrix.reset()
         when (mode) {
-            Mode.SEL_MOVE -> selMatrix.setTranslate(p.x - selStartCanvas.x, p.y - selStartCanvas.y)
+            Mode.SEL_MOVE -> {
+                val (sx, sy) = snapSelectionMove(p.x - selStartCanvas.x, p.y - selStartCanvas.y)
+                selMatrix.setTranslate(sx, sy)
+            }
             Mode.SEL_SCALE -> {
                 val dx = selCorner.x - selAnchor.x; val dy = selCorner.y - selAnchor.y
                 val l2 = (dx * dx + dy * dy).coerceAtLeast(1e-4f)
@@ -889,5 +940,357 @@ class DrawingView(context: Context, private val ctl: EditorController) : View(co
         overlayPaint.strokeWidth = 1.2f * density
         canvas.drawLine(dropPoint.x - r, dropPoint.y, dropPoint.x + r, dropPoint.y, overlayPaint)
         canvas.drawLine(dropPoint.x, dropPoint.y - r, dropPoint.x, dropPoint.y + r, overlayPaint)
+    }
+
+    // ==================================================================
+    // Precision: grid, snapping, guides, recognition, measurement
+    // ==================================================================
+
+    private val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { textSize = 12f * resources.displayMetrics.scaledDensity }
+    private val labelBg = Paint(Paint.ANTI_ALIAS_FLAG)
+
+    private fun isDarkPaper(): Boolean = androidx.core.graphics.ColorUtils.calculateLuminance(ctl.drawing.background) < 0.4
+
+    private fun activeGuide(): Guide? {
+        val p = ctl.drawing.precision
+        return if (p.guideOn) p.guide else null
+    }
+
+    /** Live points after guide projection (already applied), snapping or recognition, plus a smoothing override. */
+    private fun finalLivePoints(includePredicted: Boolean): Pair<FloatArray, Float?> {
+        recognized?.let { return it to 0f }
+        val total = liveCount + if (includePredicted) livePredictedCount else 0
+        val raw = FloatArray(total * Stroke.STRIDE)
+        System.arraycopy(live, 0, raw, 0, liveCount * Stroke.STRIDE)
+        if (includePredicted && livePredictedCount > 0) {
+            System.arraycopy(livePredicted, 0, raw, liveCount * Stroke.STRIDE, livePredictedCount * Stroke.STRIDE)
+        }
+        val pre = ctl.drawing.precision
+        if (activeGuide() != null) return raw to 0f
+        if (pre.snapOn && pre.gridOn && (pre.snap.toGrid || pre.snap.align) && total >= 2) {
+            return Snap.toGrid(raw, pre.grid, pre.snap, 12f * density / scaleOf(view)) to 0f
+        }
+        return raw to null
+    }
+
+    /** First and last points of strokes near the view, for auto-complete. */
+    private fun nearbyEnds(): List<Pt> {
+        val d = ctl.drawing
+        val out = ArrayList<Pt>()
+        val activeOnly = d.precision.snap.activeLayerOnly
+        tmpRect.set(0f, 0f, width.toFloat(), height.toFloat())
+        val vis = RectF(); inverse.mapRect(vis, tmpRect)
+        for (s in d.strokes) {
+            if (activeOnly && s.layerId != d.activeLayerId) continue
+            if (d.layer(s.layerId)?.visible == false) continue
+            val b = ctl.cache.get(s).processed.bounds
+            if (!RectF.intersects(b, vis) || s.count < 2) continue
+            out.add(Pt(s.pts[0], s.pts[1]))
+            val l = (s.count - 1) * Stroke.STRIDE
+            out.add(Pt(s.pts[l], s.pts[l + 1]))
+            if (out.size > 4000) break
+        }
+        return out
+    }
+
+    // ---- shape recognition (draw, then hold) ----
+    private var recognized: FloatArray? = null
+    private var recogBase: List<Pt> = emptyList()
+    private var recogAnchor = Pt(0f, 0f)
+    private var recogRef = Pt(0f, 0f)
+    private var recogRunnable: Runnable? = null
+    private var recogLastX = 0f
+    private var recogLastY = 0f
+
+    private fun armRecognition(sx: Float, sy: Float) {
+        val pre = ctl.drawing.precision
+        if (!pre.recognitionOn || activeGuide() != null || liveCount < 3) return
+        if (recogRunnable != null && hypot(sx - recogLastX, sy - recogLastY) < 2.5f * density) return
+        recogLastX = sx; recogLastY = sy
+        cancelRecognition()
+        val r = Runnable {
+            recogRunnable = null
+            if (mode != Mode.DRAW || recognized != null || liveCount < 4) return@Runnable
+            val xs = FloatArray(liveCount) { live[it * Stroke.STRIDE] }
+            val ys = FloatArray(liveCount) { live[it * Stroke.STRIDE + 1] }
+            val shape = Recognize.recognize(xs, ys) ?: return@Runnable
+            recogBase = shape.points
+            recogAnchor = shape.anchor
+            recogRef = Pt(xs[liveCount - 1], ys[liveCount - 1])
+            recognized = Snap.samplesAlong(shape.points, 0.6f, live[(liveCount - 1) * Stroke.STRIDE + 3])
+            performHapticFeedback(android.view.HapticFeedbackConstants.CONTEXT_CLICK)
+            invalidate()
+        }
+        recogRunnable = r
+        postDelayed(r, pre.recognitionMs.toLong())
+    }
+
+    private fun cancelRecognition() {
+        recogRunnable?.let { removeCallbacks(it) }
+        recogRunnable = null
+    }
+
+    private fun transformRecognized(x: Float, y: Float) {
+        val rx = recogRef.x - recogAnchor.x; val ry = recogRef.y - recogAnchor.y
+        val cx = x - recogAnchor.x; val cy = y - recogAnchor.y
+        val r0 = hypot(rx, ry); val r1 = hypot(cx, cy)
+        if (r0 < 1e-3f) return
+        val k = (r1 / r0).coerceIn(0.05f, 20f)
+        val a = atan2(cy, cx) - atan2(ry, rx)
+        val ca = kotlin.math.cos(a) * k; val sa = kotlin.math.sin(a) * k
+        val pts = recogBase.map { p ->
+            val dx = p.x - recogAnchor.x; val dy = p.y - recogAnchor.y
+            Pt(recogAnchor.x + dx * ca - dy * sa, recogAnchor.y + dx * sa + dy * ca)
+        }
+        recognized = Snap.samplesAlong(pts, 0.6f, 500f)
+        invalidate()
+    }
+
+    // ---- guides ----
+    private val guidePaint = Paint(Paint.ANTI_ALIAS_FLAG)
+    private var editHandle: GuideHandle? = null
+    private var editGuideStart: Guide? = null
+    private val editStartCanvas = PointF()
+    private var lastCenterTap = 0L
+
+    private fun drawGuideTemplate(canvas: Canvas, g: Guide, scale: Float, visible: RectF) {
+        val extent = hypot(visible.width(), visible.height()) * 2f
+        val path = Guides.path(g, extent)
+        guidePaint.reset(); guidePaint.isAntiAlias = true
+        guidePaint.style = Paint.Style.STROKE
+        guidePaint.strokeCap = Paint.Cap.ROUND
+        guidePaint.strokeJoin = Paint.Join.ROUND
+        val dark = isDarkPaper()
+        guidePaint.color = if (dark) 0x33FFFFFF else 0x22000000
+        guidePaint.strokeWidth = maxOf(ctl.slot.size, 6f * density / scale)
+        canvas.drawPath(path, guidePaint)
+        guidePaint.color = if (dark) 0x88FFFFFF.toInt() else 0x66000000
+        guidePaint.strokeWidth = 1f * density / scale
+        canvas.drawPath(path, guidePaint)
+    }
+
+    private fun drawGuideHandles(canvas: Canvas, g: Guide) {
+        val pts = FloatArray(2)
+        for ((h, p) in Guides.handles(g)) {
+            pts[0] = p.x; pts[1] = p.y
+            view.mapPoints(pts)
+            if (h == GuideHandle.CENTER) {
+                overlayPaint.style = Paint.Style.STROKE
+                overlayPaint.color = 0xFF2E86C1.toInt()
+                overlayPaint.strokeWidth = 1.5f * density
+                val r = 10f * density
+                canvas.drawLine(pts[0] - r, pts[1], pts[0] + r, pts[1], overlayPaint)
+                canvas.drawLine(pts[0], pts[1] - r, pts[0], pts[1] + r, overlayPaint)
+                canvas.drawCircle(pts[0], pts[1], r * 0.55f, overlayPaint)
+            } else drawHandle(canvas, pts[0], pts[1], 7f * density)
+        }
+        val pre = ctl.drawing.precision
+        if (pre.measureOn) {
+            val c = Guides.center(g)
+            pts[0] = c.x; pts[1] = c.y; view.mapPoints(pts)
+            drawLabel(canvas, Guides.measureText(g) { Units.length(it, pre.measure) }, pts[0], pts[1] + 26f * density)
+        }
+    }
+
+    private fun startGuideEdit(x: Float, y: Float, time: Long): Boolean {
+        val g = activeGuide() ?: return false
+        val pts = FloatArray(2)
+        var best: GuideHandle? = null; var bestD = 24f * density
+        for ((h, p) in Guides.handles(g)) {
+            pts[0] = p.x; pts[1] = p.y; view.mapPoints(pts)
+            val d = hypot(pts[0] - x, pts[1] - y)
+            if (d < bestD) { bestD = d; best = h }
+        }
+        val h = best ?: return false
+        if (h == GuideHandle.CENTER && time - lastCenterTap < 320) {
+            ctl.updatePrecision { it.copy(guide = Guides.perfect(g)) }
+            lastCenterTap = 0
+            mode = Mode.IGNORE
+            invalidate()
+            return true
+        }
+        if (h == GuideHandle.CENTER) lastCenterTap = time
+        mode = Mode.GUIDE_EDIT
+        editHandle = h
+        editGuideStart = g
+        toCanvas(x, y, editStartCanvas)
+        return true
+    }
+
+    private fun guideDrag(x: Float, y: Float) {
+        val h = editHandle ?: return
+        val start = editGuideStart ?: return
+        val g = activeGuide() ?: return
+        val p = PointF(); toCanvas(x, y, p)
+        var target = Pt(p.x, p.y)
+        // Handles snap to grid points when snapping is on.
+        val pre = ctl.drawing.precision
+        if (pre.gridOn && pre.snapOn && pre.snap.toGrid) target = Grid.snapPoint(pre.grid, target.x, target.y)
+        val ng = Guides.moveHandle(g, h, target, start, if (h == GuideHandle.CENTER) Pt(editStartCanvas.x, editStartCanvas.y) else target)
+        ctl.updatePrecision { it.copy(guide = ng) }
+        invalidate()
+    }
+
+    // ---- on-canvas grid editing ----
+    private var gridHandle = -1 // 0..3 vanishing point index, 10 = origin, 11 = rotation
+    private var editGridStart: com.omarkallas.inkfield.model.GridSettings? = null
+
+    private fun gridHandlePoints(): List<Pair<Int, Pt>> {
+        val g = ctl.drawing.precision.grid
+        if (g.type.perspective) return Grid.activeVpIndices(g.type).map { it to g.vps[it] }
+        val r = 90f * density / scaleOf(view)
+        val a = Math.toRadians(g.angle.toDouble())
+        return listOf(
+            10 to Pt(g.originX, g.originY),
+            11 to Pt(g.originX + (r * kotlin.math.cos(a)).toFloat(), g.originY + (r * kotlin.math.sin(a)).toFloat()),
+        )
+    }
+
+    private fun drawGridHandles(canvas: Canvas) {
+        val pts = FloatArray(2)
+        val list = gridHandlePoints()
+        val origin = list.firstOrNull { it.first == 10 }?.second
+        val rot = list.firstOrNull { it.first == 11 }?.second
+        if (origin != null && rot != null) {
+            val a = floatArrayOf(origin.x, origin.y, rot.x, rot.y); view.mapPoints(a)
+            overlayPaint.style = Paint.Style.STROKE; overlayPaint.color = 0xFF2E86C1.toInt(); overlayPaint.strokeWidth = 1.5f * density
+            canvas.drawLine(a[0], a[1], a[2], a[3], overlayPaint)
+        }
+        for ((_, p) in list) {
+            pts[0] = p.x; pts[1] = p.y; view.mapPoints(pts)
+            drawHandle(canvas, pts[0], pts[1], 9f * density)
+        }
+    }
+
+    private fun startGridEdit(x: Float, y: Float): Boolean {
+        val pts = FloatArray(2)
+        var best = -1; var bestD = 28f * density
+        for ((id, p) in gridHandlePoints()) {
+            pts[0] = p.x; pts[1] = p.y; view.mapPoints(pts)
+            val d = hypot(pts[0] - x, pts[1] - y)
+            if (d < bestD) { bestD = d; best = id }
+        }
+        if (best < 0) return false
+        mode = Mode.GRID_EDIT
+        gridHandle = best
+        editGridStart = ctl.drawing.precision.grid
+        return true
+    }
+
+    private fun gridDrag(x: Float, y: Float) {
+        val p = PointF(); toCanvas(x, y, p)
+        val g = ctl.drawing.precision.grid
+        val ng = when (gridHandle) {
+            10 -> g.copy(originX = p.x, originY = p.y)
+            11 -> {
+                var deg = Math.toDegrees(atan2(p.y - g.originY, p.x - g.originX).toDouble()).toFloat()
+                val near = (deg / 45f).roundToInt() * 45f
+                if (abs(deg - near) < 3f) deg = near // snap every 45°
+                g.copy(angle = deg)
+            }
+            in 0..3 -> {
+                val v = g.vps.toMutableList()
+                v[gridHandle] = Pt(p.x, p.y)
+                // 2-point perspective keeps both points on one horizon.
+                if (g.type == com.omarkallas.inkfield.model.GridType.PERSP2) {
+                    val other = if (gridHandle == 1) 2 else 1
+                    v[other] = Pt(v[other].x, p.y)
+                }
+                g.copy(vps = v)
+            }
+            else -> g
+        }
+        ctl.updatePrecision { it.copy(grid = ng) }
+        invalidate()
+    }
+
+    // ---- selection snapping to key points and the grid ----
+    private fun snapSelectionMove(dx: Float, dy: Float): Pair<Float, Float> {
+        val pre = ctl.drawing.precision
+        if (!pre.snapOn) return dx to dy
+        val b = ctl.selectionBounds() ?: return dx to dy
+        val keys = listOf(
+            Pt(b.left, b.top), Pt(b.right, b.top), Pt(b.right, b.bottom), Pt(b.left, b.bottom), Pt(b.centerX(), b.centerY()),
+        )
+        val radius = 12f * density / scaleOf(view)
+        var bestD = radius; var best: Pair<Float, Float>? = null
+        fun consider(k: Pt, t: Pt) {
+            val ox = t.x - (k.x + dx); val oy = t.y - (k.y + dy)
+            val d = hypot(ox, oy)
+            if (d < bestD) { bestD = d; best = (dx + ox) to (dy + oy) }
+        }
+        if (pre.snap.keyPoints) {
+            val sel = ctl.selection
+            val d = ctl.drawing
+            tmpRect.set(0f, 0f, width.toFloat(), height.toFloat())
+            val vis = RectF(); inverse.mapRect(vis, tmpRect)
+            var checked = 0
+            for (s in d.strokes) {
+                if (s.id in sel || checked > 3000) continue
+                val ob = ctl.cache.get(s).processed.bounds
+                if (!RectF.intersects(ob, vis)) continue
+                checked++
+                val targets = mutableListOf(Pt(ob.left, ob.top), Pt(ob.right, ob.top), Pt(ob.right, ob.bottom), Pt(ob.left, ob.bottom), Pt(ob.centerX(), ob.centerY()))
+                if (s.count >= 2) {
+                    targets.add(Pt(s.pts[0], s.pts[1]))
+                    val l = (s.count - 1) * Stroke.STRIDE
+                    targets.add(Pt(s.pts[l], s.pts[l + 1]))
+                }
+                for (k in keys) for (t in targets) consider(k, t)
+            }
+        }
+        if (pre.gridOn && pre.snap.toGrid && !pre.grid.type.perspective) {
+            for (k in keys) consider(k, Grid.snapPoint(pre.grid, k.x + dx, k.y + dy))
+        }
+        return best ?: (dx to dy)
+    }
+
+    // ---- measurement labels ----
+    private fun drawLabel(canvas: Canvas, text: String, x: Float, y: Float) {
+        val w = textPaint.measureText(text)
+        val h = textPaint.textSize
+        labelBg.color = 0xE6FFFFFF.toInt()
+        val pad = 5f * density
+        canvas.drawRoundRect(x - w / 2 - pad, y - h - pad * 0.6f, x + w / 2 + pad, y + pad * 0.8f, 6f * density, 6f * density, labelBg)
+        textPaint.color = 0xFF2A2A2E.toInt()
+        canvas.drawText(text, x - w / 2, y - 1f * density, textPaint)
+    }
+
+    private fun drawMeasureLabels(canvas: Canvas, visible: RectF) {
+        val d = ctl.drawing
+        val m = d.precision.measure
+        val pts = FloatArray(2)
+        var shown = 0
+        for (s in d.strokes) {
+            if (!s.measured || shown > 300) continue
+            if (d.layer(s.layerId)?.visible == false) continue
+            val pr = ctl.cache.get(s).processed
+            if (!RectF.intersects(pr.bounds, visible) || pr.n < 2) continue
+            var len = 0f
+            for (i in 1 until pr.n) len += hypot(pr.x[i] - pr.x[i - 1], pr.y[i] - pr.y[i - 1])
+            // Label at the middle of the path.
+            var acc = 0f; var mx = pr.x[0]; var my = pr.y[0]
+            for (i in 1 until pr.n) {
+                val seg = hypot(pr.x[i] - pr.x[i - 1], pr.y[i] - pr.y[i - 1])
+                if (acc + seg >= len / 2f) {
+                    val u = if (seg > 0f) (len / 2f - acc) / seg else 0f
+                    mx = pr.x[i - 1] + (pr.x[i] - pr.x[i - 1]) * u; my = pr.y[i - 1] + (pr.y[i] - pr.y[i - 1]) * u
+                    break
+                }
+                acc += seg
+            }
+            pts[0] = mx; pts[1] = my; view.mapPoints(pts)
+            drawLabel(canvas, Units.length(len, m), pts[0], pts[1] - 10f * density)
+            shown++
+        }
+        // Live length while drawing.
+        if (mode == Mode.DRAW && liveCount > 1) {
+            val (lp, _) = finalLivePoints(includePredicted = false)
+            var len = 0f
+            val n = lp.size / Stroke.STRIDE
+            for (i in 1 until n) len += hypot(lp[i * Stroke.STRIDE] - lp[(i - 1) * Stroke.STRIDE], lp[i * Stroke.STRIDE + 1] - lp[(i - 1) * Stroke.STRIDE + 1])
+            pts[0] = lp[(n - 1) * Stroke.STRIDE]; pts[1] = lp[(n - 1) * Stroke.STRIDE + 1]; view.mapPoints(pts)
+            drawLabel(canvas, Units.length(len, m), pts[0] + 34f * density, pts[1] - 24f * density)
+        }
     }
 }
