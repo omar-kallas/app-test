@@ -693,7 +693,7 @@ class DrawingView(context: Context, private val ctl: EditorController) : View(co
             if (lassoCount >= 1) {
                 val p = PointF(); toCanvas(lasso[0], lasso[1], p)
                 val hit = EditOps.pick(ctl.drawing, ctl.cache, p.x, p.y, 10f * density / scaleOf(view))
-                if (hit != null) ctl.setSelection(setOf(hit.id)) else ctl.clearSelection()
+                if (hit != null) ctl.selectIds(setOf(hit.id)) else ctl.clearSelection()
             }
         } else {
             val poly = FloatArray(lassoCount * 2)

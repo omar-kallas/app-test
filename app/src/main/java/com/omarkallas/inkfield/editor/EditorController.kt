@@ -185,7 +185,7 @@ class EditorController(initial: Drawing, val prefs: Prefs) {
         prefs.partialLasso = partialLasso
     }
 
-    fun setSelection(ids: Set<Long>) { selection = ids }
+    fun selectIds(ids: Set<Long>) { selection = ids }
 
     fun clearSelection() { selection = emptySet() }
 
