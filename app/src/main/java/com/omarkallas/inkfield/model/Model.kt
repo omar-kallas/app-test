@@ -171,4 +171,15 @@ data class DrawingInfo(
     val created: Long,
     val updated: Long,
     val deletedAt: Long? = null,
+    /** Folder id, or null for the top level. */
+    val folder: String? = null,
+)
+
+@Serializable
+data class Folder(
+    val id: String,
+    val name: String,
+    val parent: String? = null,
+    val notes: String = "",
+    val created: Long = 0,
 )

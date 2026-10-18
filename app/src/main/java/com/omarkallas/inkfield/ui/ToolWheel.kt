@@ -58,7 +58,7 @@ import com.omarkallas.inkfield.engine.BrushLib
 import com.omarkallas.inkfield.engine.CustomBrush
 import com.omarkallas.inkfield.engine.Geometry
 import com.omarkallas.inkfield.engine.Renderer
-import com.omarkallas.inkfield.model.Stroke
+import com.omarkallas.inkfield.model.Stroke as InkStroke
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
 import androidx.compose.ui.graphics.nativeCanvas
@@ -487,16 +487,16 @@ private fun SectionLabel(text: String) {
 /** A short wave drawn with a stamp brush. */
 fun DrawScope.drawStampSample(b: CustomBrush, c: Offset, r: Float, color: Color) {
     val n = 30
-    val pts = FloatArray((n + 1) * Stroke.STRIDE)
+    val pts = FloatArray((n + 1) * InkStroke.STRIDE)
     for (i in 0..n) {
         val u = i / n.toFloat()
-        pts[i * Stroke.STRIDE] = c.x - r + 2 * r * u
-        pts[i * Stroke.STRIDE + 1] = c.y + sin(u * Math.PI * 2).toFloat() * r * 0.4f
-        pts[i * Stroke.STRIDE + 2] = 0.25f + 0.75f * sin(u * Math.PI).toFloat()
-        pts[i * Stroke.STRIDE + 3] = i * 16f
+        pts[i * InkStroke.STRIDE] = c.x - r + 2 * r * u
+        pts[i * InkStroke.STRIDE + 1] = c.y + sin(u * Math.PI * 2).toFloat() * r * 0.4f
+        pts[i * InkStroke.STRIDE + 2] = 0.25f + 0.75f * sin(u * Math.PI).toFloat()
+        pts[i * InkStroke.STRIDE + 3] = i * 16f
     }
     val size = r * 0.32f
-    val s = Stroke(7, BrushType.STAMP, size, color.toArgb(), b.defaultOpacity, 0f, 0, pts, customBrush = b.id)
+    val s = InkStroke(7, BrushType.STAMP, size, color.toArgb(), b.defaultOpacity, 0f, 0, pts, customBrush = b.id)
     val pr = Geometry.process(s)
     drawIntoCanvas { cv -> Renderer.stampInto(cv.nativeCanvas, s, pr, pr.bounds) }
 }

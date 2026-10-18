@@ -114,7 +114,7 @@ fun rememberImporters(ctl: EditorController, viewRef: MutableState<DrawingView?>
                 val bytes = withContext(Dispatchers.IO) { runCatching { context.contentResolver.openInputStream(u)?.use { it.readBytes() } }.getOrNull() }
                 val p = bytes?.let { ObjectLibrary.importPack(it) }
                 ctl.refreshBrushes()
-                toast(context, if (p != null) "Imported \\"${p.name}\\"" else "That file isn't an object pack")
+                toast(context, if (p != null) "Imported ${p.name}" else "That file isn't an object pack")
             }
         }
     }

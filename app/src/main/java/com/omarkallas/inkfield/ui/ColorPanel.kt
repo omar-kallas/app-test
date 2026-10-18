@@ -6,6 +6,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -265,7 +266,7 @@ fun PaletteStrip(ctl: EditorController, modifier: Modifier = Modifier) {
             Box {
                 Row(
                     Modifier.pointerInput(colors) {
-                        androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress(
+                        detectDragGesturesAfterLongPress(
                             onDragStart = { p -> mixing = mixAt(colors, p.x / size.width) },
                             onDrag = { ch, _ -> ch.consume(); mixing = mixAt(colors, ch.position.x / size.width) },
                             onDragEnd = { mixing?.let { ctl.setColor(it, applyToSelection = true) }; mixing = null },

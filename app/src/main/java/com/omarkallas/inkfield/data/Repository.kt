@@ -5,6 +5,7 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import com.omarkallas.inkfield.model.Drawing
 import com.omarkallas.inkfield.model.DrawingInfo
+import com.omarkallas.inkfield.model.Folder
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.json.Json
 import java.io.File
@@ -44,7 +45,7 @@ class Repository(context: Context) {
     fun save(d: Drawing, thumb: Bitmap?) {
         atomicWrite(docFile(d.id), json.encodeToString(Drawing.serializer(), d).toByteArray())
         val old = readMeta(d.id)
-        val info = DrawingInfo(d.id, d.name, d.created, d.updated, old?.deletedAt)
+        val info = DrawingInfo(d.id, d.name, d.created, d.updated, old?.deletedAt, old?.folder)
         atomicWrite(metaFile(d.id), json.encodeToString(DrawingInfo.serializer(), info).toByteArray())
         if (thumb != null) {
             val tmp = File(dir, "${d.id}.png.tmp")
@@ -87,10 +88,73 @@ class Repository(context: Context) {
         val now = System.currentTimeMillis()
         val nd = d.copy(id = nid, name = "${d.name} copy", created = now, updated = now)
         atomicWrite(docFile(nid), json.encodeToString(Drawing.serializer(), nd).toByteArray())
-        writeMeta(DrawingInfo(nid, nd.name, now, now))
+        writeMeta(DrawingInfo(nid, nd.name, now, now, folder = readMeta(id)?.folder))
         val t = thumbFile(id)
         if (t.exists()) t.copyTo(thumbFile(nid), overwrite = true)
         return nid
+    }
+
+    // ------------------------------------------------------------------
+    // Folders
+    // ------------------------------------------------------------------
+    private val foldersFile = File(dir.parentFile, "folders.json")
+
+    @kotlinx.serialization.Serializable
+    data class BackupIndex(val folders: List<Folder> = emptyList(), val placement: Map<String, String> = emptyMap())
+
+    fun folders(): List<Folder> = runCatching {
+        json.decodeFromString(kotlinx.serialization.builtins.ListSerializer(Folder.serializer()), foldersFile.readText())
+    }.getOrDefault(emptyList())
+
+    private fun saveFolders(list: List<Folder>) =
+        atomicWrite(foldersFile, json.encodeToString(kotlinx.serialization.builtins.ListSerializer(Folder.serializer()), list).toByteArray())
+
+    fun createFolder(name: String, parent: String?): Folder {
+        val f = Folder(newId(), name.ifBlank { "New folder" }, parent, created = System.currentTimeMillis())
+        saveFolders(folders() + f)
+        return f
+    }
+
+    fun updateFolder(f: Folder) = saveFolders(folders().map { if (it.id == f.id) f else it })
+
+    /** Deletes a folder; its drawings and subfolders move up to its parent. */
+    fun deleteFolder(id: String) {
+        val all = folders()
+        val f = all.firstOrNull { it.id == id } ?: return
+        saveFolders(all.filter { it.id != id }.map { if (it.parent == id) it.copy(parent = f.parent) else it })
+        list().filter { it.folder == id }.forEach { moveDrawing(it.id, f.parent) }
+    }
+
+    fun moveDrawing(id: String, folder: String?) {
+        readMeta(id)?.let { writeMeta(it.copy(folder = folder)) }
+    }
+
+    fun foldersJson(): String = json.encodeToString(
+        BackupIndex.serializer(),
+        BackupIndex(folders(), list().mapNotNull { i -> i.folder?.let { i.id to it } }.toMap()),
+    )
+
+    private var importedPlacement: Map<String, String> = emptyMap()
+
+    /** Adds folders from a backup that don't exist yet, remembering where its drawings belong. */
+    fun mergeFolders(text: String) {
+        val idx = runCatching { json.decodeFromString(BackupIndex.serializer(), text) }.getOrNull() ?: return
+        val existing = folders()
+        val ids = existing.map { it.id }.toSet()
+        saveFolders(existing + idx.folders.filter { it.id !in ids })
+        importedPlacement = idx.placement
+    }
+
+    fun folderOfImported(drawingId: String): String? = importedPlacement[drawingId]
+
+    /** Saves an imported drawing, giving it a fresh id if one with the same id exists. */
+    fun importDrawing(d0: Drawing, folder: String?) {
+        val d = if (docFile(d0.id).exists()) d0.copy(id = newId(), name = d0.name + " (imported)") else d0
+        val thumb = runCatching {
+            com.omarkallas.inkfield.engine.Exporter.thumbnail(d, com.omarkallas.inkfield.engine.StrokeCache())
+        }.getOrNull()
+        save(d, thumb)
+        moveDrawing(d.id, folder)
     }
 
     /** Moves a drawing to Recently Deleted. */
