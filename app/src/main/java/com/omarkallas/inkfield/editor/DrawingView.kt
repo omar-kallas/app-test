@@ -48,7 +48,7 @@ import kotlin.math.roundToInt
 @SuppressLint("ViewConstructor")
 class DrawingView(context: Context, private val ctl: EditorController) : View(context) {
 
-    private enum class Mode { NONE, DRAW, NAVIGATE, LASSO, SLICE, SEL_MOVE, SEL_SCALE, SEL_ROTATE, SEL_PINCH, SEL_DISTORT, ARTBOARD_EDIT, EYEDROP, GUIDE_EDIT, GRID_EDIT, NUDGE, TEXT_TAP, IGNORE }
+    private enum class Mode { NONE, DRAW, NAVIGATE, LASSO, SLICE, SEL_MOVE, SEL_SCALE, SEL_ROTATE, SEL_PINCH, SEL_DISTORT, SEL_SIDE, ARTBOARD_EDIT, EYEDROP, GUIDE_EDIT, GRID_EDIT, NUDGE, TEXT_TAP, FILL_TAP, IGNORE }
 
     private val density = resources.displayMetrics.density
     private val touchSlop = ViewConfiguration.get(context).scaledTouchSlop.toFloat()
@@ -341,6 +341,15 @@ class DrawingView(context: Context, private val ctl: EditorController) : View(co
         canvas.drawLine((c[0] + c[2]) / 2f, (c[1] + c[3]) / 2f, h.x, h.y, overlayPaint)
         for (i in 0 until 4) drawHandle(canvas, c[i * 2], c[i * 2 + 1], r)
         drawHandle(canvas, h.x, h.y, r)
+        // Side handles stretch the selection in one direction.
+        if (!ctl.distortMode) for (i in 0 until 4) {
+            val j = (i + 1) % 4
+            val mx = (c[i * 2] + c[j * 2]) / 2f; val my = (c[i * 2 + 1] + c[j * 2 + 1]) / 2f
+            overlayPaint.style = Paint.Style.FILL; overlayPaint.color = Color.WHITE
+            canvas.drawRect(mx - r * 0.75f, my - r * 0.75f, mx + r * 0.75f, my + r * 0.75f, overlayPaint)
+            overlayPaint.style = Paint.Style.STROKE; overlayPaint.color = 0xFF2E86C1.toInt()
+            canvas.drawRect(mx - r * 0.75f, my - r * 0.75f, mx + r * 0.75f, my + r * 0.75f, overlayPaint)
+        }
     }
 
     private fun drawHandle(canvas: Canvas, x: Float, y: Float, r: Float) {
@@ -409,6 +418,8 @@ class DrawingView(context: Context, private val ctl: EditorController) : View(co
 
     private fun onDown(e: MotionEvent) {
         cancelHold()
+        // Touching the canvas again ends threshold adjustment of the last fill.
+        if (fillSess != null) { fillSess = null; ctl.fillSession = null }
         gestureStartTime = e.eventTime
         gestureMaxPointers = 1
         gestureMoved = false
@@ -471,6 +482,7 @@ class DrawingView(context: Context, private val ctl: EditorController) : View(co
             ToolType.EYEDROPPER -> startEyedrop(e.x, e.y)
             ToolType.NUDGE -> startNudge(e.x, e.y)
             ToolType.TEXT -> { mode = Mode.TEXT_TAP; toCanvas(e.x, e.y, lastCanvasPt) }
+            ToolType.FILL -> mode = Mode.FILL_TAP
         }
     }
 
@@ -503,7 +515,7 @@ class DrawingView(context: Context, private val ctl: EditorController) : View(co
             Mode.DRAW -> { discardLive(); startNavigate(e) }
             Mode.LASSO -> { lassoCount = 0; startNavigate(e) }
             Mode.SLICE -> { ctl.sliceEnd(); startNavigate(e) }
-            Mode.SEL_MOVE, Mode.SEL_SCALE, Mode.SEL_ROTATE, Mode.SEL_PINCH, Mode.SEL_DISTORT -> startSelPinch(e)
+            Mode.SEL_MOVE, Mode.SEL_SCALE, Mode.SEL_ROTATE, Mode.SEL_PINCH, Mode.SEL_DISTORT, Mode.SEL_SIDE -> startSelPinch(e)
             Mode.NAVIGATE -> startNavigate(e)
             else -> {}
         }
@@ -524,7 +536,7 @@ class DrawingView(context: Context, private val ctl: EditorController) : View(co
             Mode.NAVIGATE -> navigate(e)
             Mode.LASSO -> { addLasso(e.getX(idx), e.getY(idx)); invalidate() }
             Mode.SLICE -> sliceMove(e, idx)
-            Mode.SEL_MOVE, Mode.SEL_SCALE, Mode.SEL_ROTATE, Mode.SEL_DISTORT -> selDrag(e.getX(idx), e.getY(idx))
+            Mode.SEL_MOVE, Mode.SEL_SCALE, Mode.SEL_ROTATE, Mode.SEL_DISTORT, Mode.SEL_SIDE -> selDrag(e.getX(idx), e.getY(idx))
             Mode.SEL_PINCH -> selPinch(e)
             Mode.EYEDROP -> { sampleAt(e.getX(idx), e.getY(idx)); invalidate() }
             Mode.GUIDE_EDIT -> guideDrag(e.getX(idx), e.getY(idx))
@@ -565,13 +577,14 @@ class DrawingView(context: Context, private val ctl: EditorController) : View(co
                 else if (quick && gestureMaxPointers == 4) ctl.perform(ctl.prefs.tap4)
                 else if (quick && gestureMaxPointers == 1 && ctl.selection.isNotEmpty()) ctl.clearSelection()
             }
-            Mode.SEL_MOVE, Mode.SEL_SCALE, Mode.SEL_ROTATE, Mode.SEL_PINCH, Mode.SEL_DISTORT -> commitSelectionTransform()
+            Mode.SEL_MOVE, Mode.SEL_SCALE, Mode.SEL_ROTATE, Mode.SEL_PINCH, Mode.SEL_DISTORT, Mode.SEL_SIDE -> commitSelectionTransform()
             Mode.EYEDROP -> finishEyedrop()
+            Mode.FILL_TAP -> if (!gestureMoved) fillAt(e.x, e.y)
             Mode.GUIDE_EDIT, Mode.GRID_EDIT -> { editGuideStart = null; editGridStart = null }
             Mode.NUDGE -> ctl.nudgeEnd()
             Mode.ARTBOARD_EDIT -> ctl.moveArtboardEnd()
             Mode.TEXT_TAP -> if (!gestureMoved) {
-                val hit = EditOps.pick(ctl.drawing, ctl.cache, lastCanvasPt.x, lastCanvasPt.y, 6f * density / scaleOf(view))
+                val hit = EditOps.pick(ctl.drawing, ctl.cache, lastCanvasPt.x, lastCanvasPt.y, 6f * density / scaleOf(view), maskLayer = ctl.maskEditing)
                 if (hit != null && hit.brush == com.omarkallas.inkfield.model.BrushType.TEXT) ctl.textEditId = hit.id
                 else ctl.textRequest = Pt(lastCanvasPt.x, lastCanvasPt.y)
             }
@@ -596,7 +609,7 @@ class DrawingView(context: Context, private val ctl: EditorController) : View(co
             Mode.DRAW -> { cancelRecognition(); recognized = null; discardLive() }
             Mode.SLICE -> ctl.sliceEnd()
             Mode.NUDGE -> ctl.nudgeEnd()
-            Mode.SEL_MOVE, Mode.SEL_SCALE, Mode.SEL_ROTATE, Mode.SEL_PINCH, Mode.SEL_DISTORT -> { selMatrix.reset(); selHasTransform = false }
+            Mode.SEL_MOVE, Mode.SEL_SCALE, Mode.SEL_ROTATE, Mode.SEL_PINCH, Mode.SEL_DISTORT, Mode.SEL_SIDE -> { selMatrix.reset(); selHasTransform = false }
             Mode.NAVIGATE -> ctl.setViewport(currentViewport())
             Mode.EYEDROP -> { dropSnapshot?.recycle(); dropSnapshot = null }
             else -> {}
@@ -860,7 +873,7 @@ class DrawingView(context: Context, private val ctl: EditorController) : View(co
             // A tap: pick the stroke under it, or clear the selection.
             if (lassoCount >= 1) {
                 val p = PointF(); toCanvas(lasso[0], lasso[1], p)
-                val hit = EditOps.pick(ctl.drawing, ctl.cache, p.x, p.y, 10f * density / scaleOf(view))
+                val hit = EditOps.pick(ctl.drawing, ctl.cache, p.x, p.y, 10f * density / scaleOf(view), ctl.includeLocked, ctl.maskEditing)
                 if (hit != null) ctl.selectIds(setOf(hit.id)) else ctl.clearSelection()
             }
         } else {
@@ -905,6 +918,22 @@ class DrawingView(context: Context, private val ctl: EditorController) : View(co
                 return true
             }
         }
+        if (!ctl.distortMode) for (i in 0 until 4) {
+            val j = (i + 1) % 4
+            val mx = (c[i * 2] + c[j * 2]) / 2f; val my = (c[i * 2 + 1] + c[j * 2 + 1]) / 2f
+            if (hypot(mx - x, my - y) < hitR) {
+                // Edge i: 0 top, 1 right, 2 bottom, 3 left. The opposite edge stays put.
+                mode = Mode.SEL_SIDE
+                sideAxisX = i == 1 || i == 3
+                when (i) {
+                    0 -> { selAnchor.set(b.left, b.bottom); selCorner.set(b.left, b.top) }
+                    1 -> { selAnchor.set(b.left, b.top); selCorner.set(b.right, b.top) }
+                    2 -> { selAnchor.set(b.left, b.top); selCorner.set(b.left, b.bottom) }
+                    else -> { selAnchor.set(b.right, b.top); selCorner.set(b.left, b.top) }
+                }
+                return true
+            }
+        }
         val quad = floatArrayOf(c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7])
         if (Geometry.pointInPolygon(x, y, quad)) {
             mode = Mode.SEL_MOVE
@@ -924,9 +953,27 @@ class DrawingView(context: Context, private val ctl: EditorController) : View(co
             }
             Mode.SEL_SCALE -> {
                 val dx = selCorner.x - selAnchor.x; val dy = selCorner.y - selAnchor.y
-                val l2 = (dx * dx + dy * dy).coerceAtLeast(1e-4f)
-                val k = (((p.x - selAnchor.x) * dx + (p.y - selAnchor.y) * dy) / l2).coerceIn(0.03f, 50f)
-                selMatrix.setScale(k, k, selAnchor.x, selAnchor.y)
+                if (ctl.lockRatio) {
+                    val l2 = (dx * dx + dy * dy).coerceAtLeast(1e-4f)
+                    val k = (((p.x - selAnchor.x) * dx + (p.y - selAnchor.y) * dy) / l2).coerceIn(0.03f, 50f)
+                    selMatrix.setScale(k, k, selAnchor.x, selAnchor.y)
+                } else {
+                    // Free corner: width and height change independently.
+                    val kx = if (abs(dx) < 1e-3f) 1f else ((p.x - selAnchor.x) / dx).coerceIn(0.03f, 50f)
+                    val ky = if (abs(dy) < 1e-3f) 1f else ((p.y - selAnchor.y) / dy).coerceIn(0.03f, 50f)
+                    selMatrix.setScale(kx, ky, selAnchor.x, selAnchor.y)
+                }
+            }
+            Mode.SEL_SIDE -> {
+                if (sideAxisX) {
+                    val dx = selCorner.x - selAnchor.x
+                    val k = if (abs(dx) < 1e-3f) 1f else ((p.x - selAnchor.x) / dx).coerceIn(0.03f, 50f)
+                    selMatrix.setScale(k, 1f, selAnchor.x, selAnchor.y)
+                } else {
+                    val dy = selCorner.y - selAnchor.y
+                    val k = if (abs(dy) < 1e-3f) 1f else ((p.y - selAnchor.y) / dy).coerceIn(0.03f, 50f)
+                    selMatrix.setScale(1f, k, selAnchor.x, selAnchor.y)
+                }
             }
             Mode.SEL_DISTORT -> {
                 val dst = distortSrc.copyOf()
@@ -983,6 +1030,7 @@ class DrawingView(context: Context, private val ctl: EditorController) : View(co
         invalidate()
     }
 
+    private var sideAxisX = true
     private var distortCorner = 0
     private val distortSrc = FloatArray(8)
 
@@ -1462,5 +1510,130 @@ class DrawingView(context: Context, private val ctl: EditorController) : View(co
         publishReadout()
         ctl.setViewport(currentViewport())
         invalidate()
+    }
+
+    // ==================================================================
+    // Color fill (flood fill of the area under a point, like a paint bucket)
+    // ==================================================================
+
+    private class FillSession(
+        val id: Long, val sx: Int, val sy: Int, var ref: IntArray, val w: Int, val h: Int,
+        val render: Matrix, var allLayers: Boolean,
+    )
+    private var fillSess: FillSession? = null
+
+    /** Renders what the fill looks at into ARGB pixels composited over the paper color. */
+    private fun renderReference(m: Matrix, w: Int, h: Int, excludeId: Long?, allLayers: Boolean): IntArray? {
+        val bmp = runCatching { android.graphics.Bitmap.createBitmap(w, h, android.graphics.Bitmap.Config.ARGB_8888) }.getOrNull() ?: return null
+        val c = Canvas(bmp)
+        val d0 = ctl.drawing
+        c.drawColor(d0.background)
+        c.concat(m)
+        var d = if (excludeId != null) d0.copy(strokes = d0.strokes.filter { it.id != excludeId }) else d0
+        if (!allLayers) d = d.copy(layers = d.layers.filter { it.id == d.activeLayerId }.map { it.copy(visible = true) })
+        val k = run { val v = FloatArray(9); m.getValues(v); hypot(v[Matrix.MSCALE_X], v[Matrix.MSKEW_Y]) }
+        Renderer.drawStrokes(c, d, ctl.cache, RenderOptions(k))
+        val px = IntArray(w * h)
+        bmp.getPixels(px, 0, w, 0, 0, w, h)
+        bmp.recycle()
+        return px
+    }
+
+    /** Fills the region under a screen point (from a tap with the fill tool or a color dropped from the wheel). */
+    fun fillAt(sx: Float, sy: Float) {
+        if (width <= 0 || height <= 0) return
+        // Cap the work at about 4 million pixels on very large screens.
+        val k = minOf(1f, kotlin.math.sqrt(4_000_000f / (width.toFloat() * height)))
+        val w = (width * k).toInt().coerceAtLeast(1); val h = (height * k).toInt().coerceAtLeast(1)
+        val render = Matrix(view).apply { postScale(k, k) }
+        val x = (sx * k).toInt().coerceIn(0, w - 1); val y = (sy * k).toInt().coerceIn(0, h - 1)
+        val all = ctl.fillAllLayers
+        val ref = renderReference(render, w, h, null, all) ?: return
+        val res = floodRegion(ref, w, h, x, y, ctl.fillThreshold, render) ?: return
+        val id = ctl.addFlood(res.first, res.second)
+        fillSess = FillSession(id, x, y, ref, w, h, render, all)
+        ctl.fillSession = id
+        performHapticFeedback(android.view.HapticFeedbackConstants.CONTEXT_CLICK)
+    }
+
+    /** Recomputes the last fill after its threshold or reference setting changed. */
+    fun refill() {
+        val f = fillSess ?: return
+        if (ctl.fillSession != f.id || ctl.drawing.strokes.none { it.id == f.id }) { fillSess = null; return }
+        if (f.allLayers != ctl.fillAllLayers) {
+            f.ref = renderReference(f.render, f.w, f.h, f.id, ctl.fillAllLayers) ?: return
+            f.allLayers = ctl.fillAllLayers
+        }
+        val res = floodRegion(f.ref, f.w, f.h, f.sx, f.sy, ctl.fillThreshold, f.render) ?: return
+        ctl.replaceFlood(f.id, res.first, res.second)
+    }
+
+    /**
+     * Grows the region of similar color around (x, y), widens it by 2 px so it tucks under the
+     * surrounding lines, and saves it as a mask image. Returns (asset name, frame points).
+     */
+    private fun floodRegion(ref: IntArray, w: Int, h: Int, x: Int, y: Int, threshold: Float, render: Matrix): Pair<String, FloatArray>? {
+        val seed = ref[y * w + x]
+        val thr = (threshold.coerceIn(0f, 1f) * 255f).toInt()
+        val sr = (seed shr 16) and 0xFF; val sg = (seed shr 8) and 0xFF; val sb = seed and 0xFF
+        val mask = BooleanArray(w * h)
+        fun ok(i: Int): Boolean {
+            if (mask[i]) return false
+            val c = ref[i]
+            return abs(((c shr 16) and 0xFF) - sr) <= thr && abs(((c shr 8) and 0xFF) - sg) <= thr && abs((c and 0xFF) - sb) <= thr
+        }
+        val stack = IntArray(w * h / 2 + 16)
+        var sp = 0
+        stack[sp++] = y * w + x
+        var minX = x; var maxX = x; var minY = y; var maxY = y
+        while (sp > 0) {
+            val i = stack[--sp]
+            if (!ok(i)) continue
+            val row = i / w
+            var l = i % w; var r = l
+            while (l > 0 && ok(row * w + l - 1)) l--
+            while (r < w - 1 && ok(row * w + r + 1)) r++
+            for (xx in l..r) mask[row * w + xx] = true
+            if (l < minX) minX = l; if (r > maxX) maxX = r
+            if (row < minY) minY = row; if (row > maxY) maxY = row
+            for (nr in intArrayOf(row - 1, row + 1)) {
+                if (nr < 0 || nr >= h) continue
+                var xx = l
+                while (xx <= r) {
+                    if (ok(nr * w + xx)) {
+                        if (sp < stack.size) stack[sp++] = nr * w + xx
+                        while (xx <= r && ok(nr * w + xx)) xx++
+                    }
+                    xx++
+                }
+            }
+        }
+        // Widen by 2 px (separable max filter) within the bounding box.
+        val pad = 2
+        val x0 = (minX - pad).coerceAtLeast(0); val x1 = (maxX + pad).coerceAtMost(w - 1)
+        val y0 = (minY - pad).coerceAtLeast(0); val y1 = (maxY + pad).coerceAtMost(h - 1)
+        val bw = x1 - x0 + 1; val bh = y1 - y0 + 1
+        if (bw <= 0 || bh <= 0) return null
+        val tmp = BooleanArray(bw * bh)
+        for (yy in 0 until bh) for (xx in 0 until bw) {
+            var on = false
+            for (o in -pad..pad) { val sx = x0 + xx + o; if (sx in 0 until w && mask[(y0 + yy) * w + sx]) { on = true; break } }
+            tmp[yy * bw + xx] = on
+        }
+        val px = IntArray(bw * bh)
+        for (yy in 0 until bh) for (xx in 0 until bw) {
+            var on = false
+            for (o in -pad..pad) { val ty = yy + o; if (ty in 0 until bh && tmp[ty * bw + xx]) { on = true; break } }
+            px[yy * bw + xx] = if (on) 0xFF000000.toInt() else 0
+        }
+        val bmp = android.graphics.Bitmap.createBitmap(bw, bh, android.graphics.Bitmap.Config.ARGB_8888)
+        bmp.setPixels(px, 0, bw, 0, 0, bw, bh)
+        val asset = com.omarkallas.inkfield.engine.Assets.save(bmp) ?: return null
+        // Frame: the crop's corners mapped back to canvas units.
+        val inv = Matrix(); render.invert(inv)
+        val q = floatArrayOf(x0.toFloat(), y0.toFloat(), (x0 + bw).toFloat(), y0.toFloat(), x0.toFloat(), (y0 + bh).toFloat())
+        inv.mapPoints(q)
+        val pts = floatArrayOf(q[0], q[1], 0.6f, 0f, q[2], q[3], 0.6f, 0f, q[4], q[5], 0.6f, 0f)
+        return asset to pts
     }
 }

@@ -62,6 +62,21 @@ object Assets {
         return bmp
     }
 
+    private val masks = object : LruCache<String, Bitmap>((Runtime.getRuntime().maxMemory() / 16).toInt()) {
+        override fun sizeOf(key: String, value: Bitmap) = value.byteCount
+    }
+
+    /** The image's alpha channel only, for fills that are tinted with their stroke color. */
+    @Synchronized
+    fun alphaMask(name: String?): Bitmap? {
+        if (name == null) return null
+        masks.get(name)?.let { return it }
+        val src = get(name) ?: return null
+        val m = src.extractAlpha()
+        masks.put(name, m)
+        return m
+    }
+
     fun bytes(name: String): ByteArray? = runCatching { file(name).readBytes() }.getOrNull()
 
     /** Deletes asset files no drawing references any more. */

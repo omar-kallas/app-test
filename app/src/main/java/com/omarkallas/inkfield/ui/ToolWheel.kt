@@ -8,6 +8,9 @@ import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -89,6 +92,8 @@ fun ToolWheel(
     modifier: Modifier = Modifier,
 ) {
     val measurer = rememberTextMeasurer()
+    // Position of the wheel on screen, so a color dragged out of its center can be dropped on the canvas.
+    val origin = androidx.compose.runtime.remember { floatArrayOf(0f, 0f) }
     Row(modifier, verticalAlignment = Alignment.CenterVertically) {
         Panel { GlyphButton(Glyph.UNDO, { ctl.undo() }, enabled = ctl.canUndo, size = 44.dp, contentDescription = "Undo") }
         Spacer(Modifier.width(6.dp))
@@ -96,6 +101,30 @@ fun ToolWheel(
             Modifier
                 .size(WHEEL_SIZE)
                 .semantics { contentDescription = "Tool wheel" }
+                .onGloballyPositioned { val p = it.positionInRoot(); origin[0] = p.x; origin[1] = p.y }
+                .pointerInput(Unit) {
+                    // Drag the color out of the center and drop it on an area to fill it.
+                    var dragging = false
+                    detectDragGestures(
+                        onDragStart = { p ->
+                            val c = Offset(size.width / 2f, size.height / 2f)
+                            dragging = hypot(p.x - c.x, p.y - c.y) < size.width / 2f * 0.36f
+                            if (dragging) ctl.colorDragPos = Offset(origin[0] + p.x, origin[1] + p.y)
+                        },
+                        onDrag = { ch, _ ->
+                            if (dragging) {
+                                ch.consume()
+                                ctl.colorDragPos = Offset(origin[0] + ch.position.x, origin[1] + ch.position.y)
+                            }
+                        },
+                        onDragEnd = {
+                            if (dragging) ctl.colorDragPos?.let { ctl.colorDropRequest = android.graphics.PointF(it.x, it.y) }
+                            dragging = false
+                            ctl.colorDragPos = null
+                        },
+                        onDragCancel = { dragging = false; ctl.colorDragPos = null },
+                    )
+                }
                 .pointerInput(Unit) {
                     detectDragGesturesAfterLongPress(
                         onDrag = { change, amount -> change.consume(); onDrag(amount) },
@@ -232,6 +261,16 @@ fun DrawScope.drawSlotGlyph(slot: ToolSlot, c: Offset, r: Float, color: Color) {
             drawLine(ink, Offset(c.x - r * 0.3f, c.y), Offset(c.x + r * 0.5f, c.y), w, StrokeCap.Round)
             drawLine(ink, Offset(c.x + r * 0.5f, c.y), Offset(c.x + r * 0.2f, c.y - r * 0.3f), w, StrokeCap.Round)
             drawLine(ink, Offset(c.x + r * 0.5f, c.y), Offset(c.x + r * 0.2f, c.y + r * 0.3f), w, StrokeCap.Round)
+        }
+        ToolType.FILL -> {
+            // A tipped paint bucket with a drop.
+            val w = r * 0.14f
+            val p = Path().apply {
+                moveTo(c.x - r * 0.6f, c.y - r * 0.2f); lineTo(c.x, c.y - r * 0.8f); lineTo(c.x + r * 0.6f, c.y - r * 0.2f)
+                lineTo(c.x, c.y + r * 0.4f); close()
+            }
+            drawPath(p, ink, style = Stroke(w, join = androidx.compose.ui.graphics.StrokeJoin.Round))
+            drawCircle(color, r * 0.22f, Offset(c.x + r * 0.62f, c.y + r * 0.55f))
         }
         ToolType.TEXT -> {
             val w = r * 0.16f
@@ -430,13 +469,34 @@ fun BrushMenu(
                 if (BrushLib.user.isNotEmpty()) Chip("Export", false) { onExportBrushes() }
             }
             SectionLabel("Brush library")
-            BrushLib.library.forEach { cb ->
-                val active = slot.brush == BrushType.STAMP && slot.custom == cb.id
-                MenuRow(active, { ctl.setSlotCustom(slotIndex, cb); onClose() }) {
-                    Canvas(Modifier.size(44.dp, 26.dp)) { drawStampSample(cb, Offset(size.width / 2, size.height / 2), size.width * 0.42f, Color(ctl.color)) }
-                    Spacer(Modifier.width(12.dp))
-                    Text(cb.name, color = Ink.text, modifier = Modifier.weight(1f))
-                    GlyphButton(Glyph.DUPLICATE, { onEditBrush(cb.copy(id = BrushLib.newId(), name = cb.name + " copy", library = false)) }, size = 30.dp, contentDescription = "Duplicate and edit")
+            val activePack = BrushLib.library.firstOrNull { slot.brush == BrushType.STAMP && it.id == slot.custom }?.pack
+            var open by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(setOfNotNull(activePack)) }
+            BrushLib.packs.forEach { (pack, description) ->
+                val brushes = BrushLib.library.filter { it.pack == pack }
+                if (brushes.isEmpty()) return@forEach
+                val expanded = pack in open
+                Row(
+                    Modifier.fillMaxWidth().clickable { open = if (expanded) open - pack else open + pack }.padding(horizontal = 14.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(if (expanded) "▾" else "▸", color = Ink.muted, modifier = Modifier.width(16.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text(pack, color = Ink.text, fontWeight = FontWeight.Medium, fontSize = 14.sp)
+                        Text(description, color = Ink.muted, fontSize = 11.sp, maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
+                    }
+                    Text("${brushes.size}", color = Ink.muted, fontSize = 12.sp)
+                }
+                if (expanded) brushes.forEach { cb ->
+                    val active = slot.brush == BrushType.STAMP && slot.custom == cb.id
+                    val swatch = cb.pattern != null && !cb.pattern.name.startsWith("PAPER")
+                    MenuRow(active, { ctl.setSlotCustom(slotIndex, cb); onClose() }) {
+                        Canvas(Modifier.size(if (swatch) 64.dp else 44.dp, if (swatch) 36.dp else 26.dp)) {
+                            drawStampSample(cb, Offset(size.width / 2, size.height / 2), size.width * 0.42f, Color(ctl.color), thick = swatch)
+                        }
+                        Spacer(Modifier.width(12.dp))
+                        Text(cb.name, color = Ink.text, modifier = Modifier.weight(1f))
+                        GlyphButton(Glyph.DUPLICATE, { onEditBrush(cb.copy(id = BrushLib.newId(), name = cb.name + " copy", library = false, pack = "")) }, size = 30.dp, contentDescription = "Duplicate and edit")
+                    }
                 }
             }
             SectionLabel("Tools")
@@ -447,6 +507,7 @@ fun BrushMenu(
                 Triple(ToolType.NUDGE, null, "Nudge"),
                 Triple(ToolType.SELECT, null, "Select (lasso)"),
                 Triple(ToolType.TEXT, null, "Text"),
+                Triple(ToolType.FILL, null, "Fill bucket"),
                 Triple(ToolType.EYEDROPPER, null, "Color picker"),
                 Triple(ToolType.PAN, null, "Pan"),
             ).forEach { (t, b, label) ->
@@ -485,17 +546,17 @@ private fun SectionLabel(text: String) {
 }
 
 /** A short wave drawn with a stamp brush. */
-fun DrawScope.drawStampSample(b: CustomBrush, c: Offset, r: Float, color: Color) {
+fun DrawScope.drawStampSample(b: CustomBrush, c: Offset, r: Float, color: Color, thick: Boolean = false) {
     val n = 30
     val pts = FloatArray((n + 1) * InkStroke.STRIDE)
     for (i in 0..n) {
         val u = i / n.toFloat()
         pts[i * InkStroke.STRIDE] = c.x - r + 2 * r * u
-        pts[i * InkStroke.STRIDE + 1] = c.y + sin(u * Math.PI * 2).toFloat() * r * 0.4f
+        pts[i * InkStroke.STRIDE + 1] = c.y + sin(u * Math.PI * 2).toFloat() * r * (if (thick) 0.12f else 0.4f)
         pts[i * InkStroke.STRIDE + 2] = 0.25f + 0.75f * sin(u * Math.PI).toFloat()
         pts[i * InkStroke.STRIDE + 3] = i * 16f
     }
-    val size = r * 0.32f
+    val size = if (thick) r * 0.75f else r * 0.32f
     val s = InkStroke(7, BrushType.STAMP, size, color.toArgb(), b.defaultOpacity, 0f, 0, pts, customBrush = b.id)
     val pr = Geometry.process(s)
     drawIntoCanvas { cv -> Renderer.stampInto(cv.nativeCanvas, s, pr, pr.bounds) }

@@ -13,13 +13,13 @@ Every push to `main` builds a new APK automatically (see the Actions tab).
 ## Features
 
 - **Canvas:** infinite, with pan, zoom and rotate (snapping optional); an optional artboard for exact sizes
-- **Brushes:** pen, fountain, dynamic, fixed width, wire, marker, airbrush, soft/hard pencil, watercolor, dotted, fill; a stamp-brush library and a brush editor; brush packs as files
+- **Brushes:** pen, fountain, dynamic, fixed width, wire, marker, airbrush, soft/hard pencil, watercolor, dotted, fill; a brush library in packs (pencils, pastels, watercolor, airbrushes, spray paints, ink and blot, crosshatching, halftones, Memphis patterns, exterior walls, tiling patterns, textures); a brush editor with textures, halftone and glaze options; brush packs as files
 - **Editable strokes:** every stroke keeps its raw input, so brush, size, opacity, smoothing and color can change later
-- **Tools:** Slice, Hard/Soft Mask (non-destructive), Nudge, Select, Text, Color picker, Pan; tool wheel or toolbar
+- **Tools:** Slice, Hard/Soft Mask (non-destructive), Nudge, Select, Text, Color picker, Fill bucket (or drag the color from the wheel onto an area), Pan; tool wheel or toolbar, which can be hidden
 - **Color:** swatch wheel, HSV/RGB, hex, multiple palettes, harmonies, palette strip with mixing
 - **Precision:** grids (incl. 1/2/3-point perspective), snapping, shape guides, shape recognition, measurement with units and drawing scale
-- **Selection:** lasso or tap, move/scale/rotate/distort, flip, duplicate, group, lock, restyle, exact sizes
-- **Layers:** automatic per-tool or manual; visibility, lock, opacity, rename, duplicate, merge, reorder
+- **Selection:** lasso or tap, move/scale (free or proportional)/stretch/rotate/distort, flip, duplicate, group, lock, restyle, exact sizes
+- **Layers:** automatic per-tool or manual; visibility, lock, opacity, blend modes, layer masks, rename, duplicate, merge, reorder
 - **Import:** photos, camera, image and PDF files, clipboard; object library (shapes, arrows, marks, people, vehicles, 1:100 furniture) and your own packs
 - **Gallery:** folders with notes, sorting and grouping, Recently Deleted, backups, .inkfield files, optional copy to a device folder
 - **Export:** PNG, JPG, SVG, PDF (vector or flattened), PSD with layers, DXF, .inkfield — whole drawing, artboard, selection or screen

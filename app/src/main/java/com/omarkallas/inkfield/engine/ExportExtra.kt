@@ -83,7 +83,7 @@ object ExportExtra {
         g(0, "SECTION"); g(2, "ENTITIES")
         for (s in d.strokes) {
             if (only != null && s.id !in only) continue
-            if (s.brush.isMask || s.brush == BrushType.IMAGE) continue
+            if (s.brush.isMask || s.onMask || s.brush == BrushType.IMAGE || s.brush == BrushType.FLOOD) continue
             val lname = layerName(s.layerId)
             val color = aci(s.color)
             if (s.brush == BrushType.TEXT) {
@@ -160,7 +160,10 @@ object ExportExtra {
                 if (includeBackground) c.drawColor(d.background)
                 Renderer.drawStrokes(c, src, cache, RenderOptions(viewScale = k))
             } else {
-                val one = src.copy(layers = src.layers.filter { it.id == layerId }.map { it.copy(visible = true, opacity = 1f) })
+                // Each PSD layer holds its own pixels; its blend mode and opacity go in the layer record.
+                val one = src.copy(layers = src.layers.filter { it.id == layerId }.map {
+                    it.copy(visible = true, opacity = 1f, blend = com.omarkallas.inkfield.model.LayerBlend.NORMAL)
+                })
                 Renderer.drawStrokes(c, one, cache, RenderOptions(viewScale = k))
             }
             return bmp
@@ -178,6 +181,7 @@ object ExportExtra {
         val bgCount = if (includeBackground) 1 else 0
         val count = layers.size + bgCount
         val names = (if (includeBackground) listOf("Paper") else emptyList()) + layers.map { it.name }
+        val blendKeys = (if (includeBackground) listOf("norm") else emptyList()) + layers.map { it.blend.psdKey }
         fun pascal(name: String): ByteArray {
             val b = name.toByteArray(Charsets.ISO_8859_1).take(255).toByteArray()
             val raw = byteArrayOf(b.size.toByte()) + b
@@ -199,7 +203,7 @@ object ExportExtra {
             out.writeInt(0); out.writeInt(0); out.writeInt(h); out.writeInt(w)
             out.writeShort(4)
             for (id in intArrayOf(-1, 0, 1, 2)) { out.writeShort(id); out.writeInt(chanLen) }
-            out.writeBytes("8BIM"); out.writeBytes("norm")
+            out.writeBytes("8BIM"); out.writeBytes(blendKeys[i])
             out.write((opacities[i] * 255).roundToInt().coerceIn(0, 255))
             out.write(0)
             out.write(if (hidden[i]) 0x02 else 0x00)

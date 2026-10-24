@@ -14,6 +14,9 @@ import android.graphics.RectF
 import android.graphics.Shader
 import com.omarkallas.inkfield.model.BrushType
 import com.omarkallas.inkfield.model.Drawing
+import com.omarkallas.inkfield.model.Layer
+import com.omarkallas.inkfield.model.LayerBlend
+import android.os.Build
 import com.omarkallas.inkfield.model.Stroke
 import kotlin.math.atan2
 import kotlin.math.ceil
@@ -89,19 +92,71 @@ object Renderer {
         for (layer in d.layers) {
             if (!layer.visible) continue
             val list = byLayer[layer.id] ?: continue
+            val useMask = layer.hasMask && layer.maskEnabled
             val faded = layer.opacity < 0.999f
-            // Masks erase only within their own layer, so a masked layer renders offscreen.
-            val hasMask = list.any { it.brush.isMask }
-            val save = if (faded || hasMask) canvas.saveLayerAlpha(null, (layer.opacity * 255).roundToInt()) else -1
+            // Erasers and layer masks work only within their own layer, so such layers render offscreen;
+            // so does any layer with a blend mode.
+            val hasEraser = list.any { it.brush.isMask && !it.onMask }
+            val blended = layer.blend != LayerBlend.NORMAL
+            val save = if (faded || hasEraser || useMask || blended) canvas.saveLayer(null, layerPaint(layer)) else -1
             for (s in list) {
+                if (s.onMask) continue
                 if (opt.skip != null && s.id in opt.skip) continue
                 val e = cache.get(s)
                 if (opt.visible != null && !s.brush.isMask && !RectF.intersects(e.processed.bounds, opt.visible)) continue
                 val dim = opt.highlight != null && s.id !in opt.highlight
                 drawEntry(canvas, e, opt.viewScale, if (dim) 0.28f else 1f)
             }
+            if (useMask) drawLayerMask(canvas, list, cache, opt)
             if (save >= 0) canvas.restoreToCount(save)
         }
+    }
+
+    private fun layerPaint(layer: Layer): Paint = Paint().apply {
+        alpha = (layer.opacity * 255).roundToInt().coerceIn(0, 255)
+        applyBlend(this, layer.blend)
+    }
+
+    /** Sets a layer blend mode on [p]: full set on Android 10+, the Porter-Duff subset before that. */
+    fun applyBlend(p: Paint, b: LayerBlend) {
+        if (b == LayerBlend.NORMAL) return
+        if (Build.VERSION.SDK_INT >= 29) { Blend29.apply(p, b); return }
+        val mode = when (b) {
+            LayerBlend.MULTIPLY -> PorterDuff.Mode.MULTIPLY
+            LayerBlend.SCREEN -> PorterDuff.Mode.SCREEN
+            LayerBlend.OVERLAY -> PorterDuff.Mode.OVERLAY
+            LayerBlend.DARKEN, LayerBlend.COLOR_BURN -> PorterDuff.Mode.DARKEN
+            LayerBlend.LIGHTEN, LayerBlend.COLOR_DODGE -> PorterDuff.Mode.LIGHTEN
+            LayerBlend.ADD -> PorterDuff.Mode.ADD
+            else -> null
+        }
+        if (mode != null) p.xfermode = PorterDuffXfermode(mode)
+    }
+
+    /**
+     * The layer mask starts fully revealing; mask strokes darker than mid-gray hide the layer,
+     * lighter ones reveal it again (gray gives partial transparency).
+     */
+    private fun drawLayerMask(canvas: Canvas, list: List<Stroke>, cache: StrokeCache, opt: RenderOptions) {
+        val m = canvas.saveLayer(null, Paint().apply { xfermode = dstIn })
+        canvas.drawColor(Color.BLACK)
+        for (s in list) {
+            if (!s.onMask) continue
+            val e = cache.get(s)
+            if (opt.visible != null && !RectF.intersects(e.processed.bounds, opt.visible)) continue
+            val lum = androidx.core.graphics.ColorUtils.calculateLuminance(s.color).toFloat()
+            val hide = lum < 0.5f
+            val strength = if (hide) 1f - lum else lum
+            val p = Paint().apply {
+                alpha = (strength * 255).roundToInt().coerceIn(0, 255)
+                if (hide) xfermode = dstOut
+            }
+            val b = RectF(e.processed.bounds); b.inset(-2f, -2f)
+            val sl = canvas.saveLayer(b, p)
+            drawEntry(canvas, e, opt.viewScale)
+            canvas.restoreToCount(sl)
+        }
+        canvas.restoreToCount(m)
     }
 
     /**
@@ -119,6 +174,7 @@ object Renderer {
         when (s.brush) {
             BrushType.TEXT -> { drawText(canvas, s, a); return }
             BrushType.IMAGE -> { drawImage(canvas, s, e, a); return }
+            BrushType.FLOOD -> { drawFlood(canvas, s, e, a); return }
             BrushType.STAMP -> { drawStamps(canvas, e, alphaMul); return }
             BrushType.MASK_HARD, BrushType.MASK_SOFT -> {
                 paint.style = Paint.Style.FILL
@@ -236,10 +292,34 @@ object Renderer {
         canvas.drawBitmap(bmp, m, paint)
     }
 
+    // ---- color fills (alpha mask tinted with the stroke color) ----
+    private fun drawFlood(canvas: Canvas, s: Stroke, e: StrokeCache.Entry, alpha: Float) {
+        val mask = Assets.alphaMask(s.asset)
+        if (mask == null) {
+            paint.style = Paint.Style.STROKE; paint.color = 0x66000000; paint.strokeWidth = 1f
+            canvas.drawPath(e.path, paint)
+            return
+        }
+        val m = frameMatrix(s, mask.width.toFloat(), mask.height.toFloat()) ?: return
+        paint.isFilterBitmap = true
+        paint.color = s.color
+        paint.alpha = (alpha * 255).roundToInt().coerceIn(0, 255)
+        canvas.drawBitmap(mask, m, paint)
+    }
+
     // ---- stamp brushes ----
     private fun drawStamps(canvas: Canvas, e: StrokeCache.Entry, alphaMul: Float) {
         val pic = e.picture ?: recordStamps(e).also { e.picture = it }
-        val save = if (alphaMul < 0.999f) canvas.saveLayerAlpha(null, (alphaMul * 255).roundToInt()) else canvas.save()
+        val brush = BrushLib.find(e.stroke.customBrush)
+        val save = if (brush?.glaze == true) {
+            // Glazing: the stroke darkens what is already on the layer, as watercolor washes do.
+            val gp = Paint().apply {
+                alpha = (alphaMul * 255).roundToInt().coerceIn(0, 255)
+                if (Build.VERSION.SDK_INT >= 29) Blend29.apply(this, LayerBlend.MULTIPLY)
+                else xfermode = PorterDuffXfermode(PorterDuff.Mode.DARKEN)
+            }
+            canvas.saveLayer(e.processed.bounds, gp)
+        } else if (alphaMul < 0.999f) canvas.saveLayerAlpha(null, (alphaMul * 255).roundToInt()) else canvas.save()
         canvas.translate(e.pictureLeft, e.pictureTop)
         canvas.drawPicture(pic)
         canvas.restoreToCount(save)
@@ -266,9 +346,13 @@ object Renderer {
         val half = bmp.width / 2f
         val rnd = Random(s.id)
         val p = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
-        val baseAlpha = Color.alpha(s.color) / 255f * s.opacity
+        val texture = brush.texture
+        // Halftones: opacity sets the dot/line size instead of fading the stroke.
+        val halftone = brush.threshold && texture != null && texture.gradient
+        val baseAlpha = Color.alpha(s.color) / 255f * (if (halftone) 1f else s.opacity)
         val m = Matrix()
-        val grainLayer = if (brush.grain) c.saveLayer(bounds, null) else -1
+        val thresholdLayer = if (halftone) c.saveLayer(bounds, thresholdPaint(s.opacity)) else -1
+        val grainLayer = if (texture != null) c.saveLayer(bounds, null) else -1
         fun stampAt(x: Float, y: Float, pressure: Float, angle: Float) {
             val fp = pressure - 0.6f
             val size = (s.size * (1f + brush.sizePressure * fp * 1.6f)).coerceAtLeast(0.05f) * (1f - brush.sizeJitter * rnd.nextFloat())
@@ -306,14 +390,32 @@ object Renderer {
                 carry = len - (d - step)
             }
         }
-        if (grainLayer >= 0) {
+        if (grainLayer >= 0 && texture != null) {
+            val scale = if (brush.pattern == null) 0.6f else brush.patternScale.coerceAtLeast(0.02f)
             val gp = Paint().apply {
-                shader = grainShader(0.6f, false)
+                shader = Patterns.shader(texture, scale)
+                isFilterBitmap = true
                 xfermode = dstIn
             }
             c.drawRect(bounds, gp)
             c.restoreToCount(grainLayer)
         }
+        if (thresholdLayer >= 0) c.restoreToCount(thresholdLayer)
+    }
+
+    /** Hardens the alpha of a halftone layer: pixels above the level turn on, others off. */
+    private fun thresholdPaint(opacity: Float): Paint {
+        val t = (1f - 0.88f * opacity.coerceIn(0f, 1f)).coerceIn(0.05f, 0.97f)
+        val k = 9f
+        val cm = android.graphics.ColorMatrix(
+            floatArrayOf(
+                1f, 0f, 0f, 0f, 0f,
+                0f, 1f, 0f, 0f, 0f,
+                0f, 0f, 1f, 0f, 0f,
+                0f, 0f, 0f, k, -k * t * 255f,
+            ),
+        )
+        return Paint().apply { colorFilter = android.graphics.ColorMatrixColorFilter(cm) }
     }
 
     /** Draws a set of strokes with an extra canvas-space transform (live selection preview). */
@@ -325,7 +427,7 @@ object Renderer {
         for (s in strokes) {
             val layer = d.layer(s.layerId)
             if (layer != null && !layer.visible) continue
-            if (s.brush.isMask) continue // masks can't preview outside their layer
+            if (s.brush.isMask && !s.onMask) continue // erasers can't preview outside their layer
             drawEntry(canvas, cache.get(s), viewScale * ms, layer?.opacity ?: 1f)
         }
         canvas.restore()
@@ -336,12 +438,38 @@ object Renderer {
         val r = RectF()
         var any = false
         for (s in d.strokes) {
-            if (s.brush.isMask) continue
+            if (s.brush.isMask || s.onMask) continue
             if (onlyVisible && d.layer(s.layerId)?.visible == false) continue
             val b = cache.get(s).processed.bounds
             if (b.isEmpty) continue
             if (!any) { r.set(b); any = true } else r.union(b)
         }
         return if (any) r else null
+    }
+}
+
+/** Blend modes that need Android 10 (kept in a separate class so older devices never load them). */
+@androidx.annotation.RequiresApi(29)
+private object Blend29 {
+    fun apply(p: Paint, b: LayerBlend) {
+        p.blendMode = when (b) {
+            LayerBlend.NORMAL -> android.graphics.BlendMode.SRC_OVER
+            LayerBlend.MULTIPLY -> android.graphics.BlendMode.MULTIPLY
+            LayerBlend.DARKEN -> android.graphics.BlendMode.DARKEN
+            LayerBlend.COLOR_BURN -> android.graphics.BlendMode.COLOR_BURN
+            LayerBlend.SCREEN -> android.graphics.BlendMode.SCREEN
+            LayerBlend.LIGHTEN -> android.graphics.BlendMode.LIGHTEN
+            LayerBlend.COLOR_DODGE -> android.graphics.BlendMode.COLOR_DODGE
+            LayerBlend.ADD -> android.graphics.BlendMode.PLUS
+            LayerBlend.OVERLAY -> android.graphics.BlendMode.OVERLAY
+            LayerBlend.SOFT_LIGHT -> android.graphics.BlendMode.SOFT_LIGHT
+            LayerBlend.HARD_LIGHT -> android.graphics.BlendMode.HARD_LIGHT
+            LayerBlend.DIFFERENCE -> android.graphics.BlendMode.DIFFERENCE
+            LayerBlend.EXCLUSION -> android.graphics.BlendMode.EXCLUSION
+            LayerBlend.HUE -> android.graphics.BlendMode.HUE
+            LayerBlend.SATURATION -> android.graphics.BlendMode.SATURATION
+            LayerBlend.COLOR -> android.graphics.BlendMode.COLOR
+            LayerBlend.LUMINOSITY -> android.graphics.BlendMode.LUMINOSITY
+        }
     }
 }

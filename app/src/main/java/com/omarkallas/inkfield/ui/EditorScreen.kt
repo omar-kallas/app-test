@@ -178,7 +178,7 @@ private fun EditorScreenContent(ctl: EditorController, repo: Repository, onExit:
             modifier = Modifier.fillMaxSize(),
             update = { v ->
                 // Reading these states re-runs update when they change.
-                ctl.version; ctl.selection; ctl.slot; ctl.color; ctl.gridEditing; ctl.eyedropperArmed; ctl.artboardEditing
+                ctl.version; ctl.selection; ctl.slot; ctl.color; ctl.gridEditing; ctl.eyedropperArmed; ctl.artboardEditing; ctl.lockRatio; ctl.distortMode; ctl.maskEditing
                 v.invalidate()
             },
         )
@@ -287,6 +287,44 @@ private fun EditorScreenContent(ctl: EditorController, repo: Repository, onExit:
             )
         }
 
+        ctl.maskEditing?.let { maskLayer ->
+            val name = ctl.drawing.layer(maskLayer)?.name ?: "layer"
+            Panel(Modifier.align(Alignment.TopCenter).statusBarsPadding().padding(top = 72.dp)) {
+                Row(Modifier.padding(start = 14.dp, end = 4.dp, top = 4.dp, bottom = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Column {
+                        Text("Editing the mask of \"$name\"", color = Ink.text, fontSize = 14.sp)
+                        Text("Black hides the layer, white reveals it", color = Ink.muted, fontSize = 11.sp)
+                    }
+                    Spacer(Modifier.width(8.dp))
+                    Chip("Black", ctl.color == 0xFF000000.toInt()) { ctl.setColor(0xFF000000.toInt(), applyToSelection = false) }
+                    Spacer(Modifier.width(4.dp))
+                    Chip("White", ctl.color == 0xFFFFFFFF.toInt()) { ctl.setColor(0xFFFFFFFF.toInt(), applyToSelection = false) }
+                    androidx.compose.material3.TextButton(onClick = { ctl.editMask(null) }) { Text("Done") }
+                }
+            }
+        }
+
+        if (ctl.fillSession != null) {
+            Panel(Modifier.align(Alignment.TopCenter).statusBarsPadding().padding(top = 72.dp).width(340.dp)) {
+                Column(Modifier.padding(horizontal = 14.dp, vertical = 6.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("Fill threshold ${(ctl.fillThreshold * 100).roundToInt()}%", color = Ink.text, fontSize = 14.sp, modifier = Modifier.weight(1f))
+                        androidx.compose.material3.TextButton(onClick = { ctl.fillSession = null }) { Text("Done") }
+                    }
+                    Slider(
+                        value = ctl.fillThreshold, onValueChange = { ctl.fillThreshold = it }, valueRange = 0f..1f,
+                        onValueChangeFinished = { ctl.prefs.fillThreshold = ctl.fillThreshold },
+                        colors = SliderDefaults.colors(thumbColor = Ink.text, activeTrackColor = Ink.text),
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Chip("All layers", ctl.fillAllLayers) { ctl.fillAllLayers = true; ctl.prefs.fillAllLayers = true }
+                        Chip("This layer", !ctl.fillAllLayers) { ctl.fillAllLayers = false; ctl.prefs.fillAllLayers = false }
+                    }
+                    Text("Higher fills across softer edges; lower stops at faint lines.", color = Ink.muted, fontSize = 11.sp)
+                }
+            }
+        }
+
         if (ctl.eyedropperArmed) {
             Panel(Modifier.align(Alignment.TopCenter).statusBarsPadding().padding(top = 72.dp)) {
                 Row(Modifier.padding(start = 14.dp, end = 4.dp, top = 4.dp, bottom = 4.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -317,6 +355,14 @@ private fun EditorScreenContent(ctl: EditorController, repo: Repository, onExit:
         LaunchedEffect(ctl.zoomRequest) {
             ctl.zoomRequest?.let { viewRef.value?.zoomBy(it); ctl.zoomRequest = null }
         }
+        // A color dragged out of the wheel and dropped on the canvas fills the area under it.
+        LaunchedEffect(ctl.colorDropRequest) {
+            ctl.colorDropRequest?.let { p -> ctl.colorDropRequest = null; viewRef.value?.fillAt(p.x, p.y) }
+        }
+        // Adjusting the last fill's threshold or reference redoes it (after a short pause while sliding).
+        LaunchedEffect(ctl.fillThreshold, ctl.fillAllLayers) {
+            if (ctl.fillSession != null) { delay(140); viewRef.value?.refill() }
+        }
 
         if (ctl.uiHidden) {
             // Everything but the canvas is hidden; this small button brings it back.
@@ -326,14 +372,28 @@ private fun EditorScreenContent(ctl: EditorController, repo: Repository, onExit:
         }
 
         // ---- tool wheel or toolbar ----
-        if (!ctl.uiHidden && barMode) ToolBar(
+        val showTools = !ctl.uiHidden && !ctl.wheelHidden
+        if (!ctl.uiHidden && ctl.wheelHidden) {
+            // The wheel is tucked away: a small pill keeps undo, redo and a way back.
+            Panel(Modifier.align(Alignment.BottomStart).navigationBarsPadding().padding(12.dp)) {
+                Row(Modifier.padding(4.dp), verticalAlignment = Alignment.CenterVertically) {
+                    GlyphButton(Glyph.UNDO, { ctl.undo() }, enabled = ctl.canUndo, contentDescription = "Undo")
+                    Box(
+                        Modifier.size(34.dp).clip(CircleShape).background(Color(ctl.color)).border(1.dp, Ink.outline, CircleShape)
+                            .clickable { ctl.toggleWheel() },
+                    )
+                    GlyphButton(Glyph.REDO, { ctl.redo() }, enabled = ctl.canRedo, contentDescription = "Redo")
+                }
+            }
+        }
+        if (showTools && barMode) ToolBar(
             ctl = ctl,
             onOpenProp = { k -> overlay = when (k) { PropKind.SIZE -> Overlay.PROP_SIZE; PropKind.OPACITY -> Overlay.PROP_OPACITY; PropKind.SMOOTHING -> Overlay.PROP_SMOOTHING } },
             onOpenColor = { overlay = if (ctl.prefs.colorMode == "swatch") Overlay.SWATCHES else Overlay.COLOR },
             onOpenBrushMenu = { brushSlot = it; overlay = Overlay.BRUSHES },
             modifier = Modifier.offset { IntOffset(margin.roundToInt(), barY.roundToInt()) },
         )
-        if (!ctl.uiHidden && !barMode) ToolWheel(
+        if (showTools && !barMode) ToolWheel(
             ctl = ctl,
             onOpenProp = { k -> overlay = when (k) { PropKind.SIZE -> Overlay.PROP_SIZE; PropKind.OPACITY -> Overlay.PROP_OPACITY; PropKind.SMOOTHING -> Overlay.PROP_SMOOTHING } },
             onOpenColor = { overlay = if (ctl.prefs.colorMode == "swatch") Overlay.SWATCHES else Overlay.COLOR },
@@ -343,7 +403,7 @@ private fun EditorScreenContent(ctl: EditorController, repo: Repository, onExit:
             modifier = Modifier.offset { IntOffset(wx.roundToInt(), wy.roundToInt()) },
         )
 
-        if (ctl.paletteStrip && !ctl.uiHidden) {
+        if (ctl.paletteStrip && showTools) {
             val stripH = with(density) { 40.dp.toPx() }
             val below = ay + ah + stripH + margin < maxH && !(barMode && ctl.toolbarMode == com.omarkallas.inkfield.prefs.ToolbarMode.BAR_BOTTOM)
             PaletteStrip(
@@ -354,6 +414,14 @@ private fun EditorScreenContent(ctl: EditorController, repo: Repository, onExit:
                         (if (below) ay + ah + margin * 0.5f else ay - stripH - margin * 0.5f).roundToInt(),
                     )
                 },
+            )
+        }
+
+        ctl.colorDragPos?.let { p ->
+            val r = with(density) { 22.dp.toPx() }
+            Box(
+                Modifier.offset { IntOffset((p.x - r).roundToInt(), (p.y - r * 2.6f).roundToInt()) }
+                    .size(44.dp).clip(CircleShape).background(Color(ctl.color)).border(2.dp, Color.White, CircleShape),
             )
         }
 
@@ -502,6 +570,7 @@ private fun StatusBar(
             }
             GlyphButton(Glyph.RULER, onTogglePrecision, active = precisionOpen, contentDescription = "Precision")
             GlyphButton(Glyph.LAYERS, onToggleLayers, active = layersOpen, contentDescription = "Layers")
+            GlyphButton(Glyph.WHEEL, { ctl.toggleWheel() }, active = !ctl.wheelHidden, contentDescription = if (ctl.wheelHidden) "Show tool wheel" else "Hide tool wheel")
             GlyphButton(Glyph.OBJECTS, onToggleObjects, active = objectsOpen, contentDescription = "Objects")
             Box {
                 GlyphButton(Glyph.IMPORT, { importMenu = true }, contentDescription = "Import")
@@ -533,6 +602,8 @@ private fun SelectionBar(ctl: EditorController, importers: Importers, modifier: 
             Chip(if (ctl.selectionScaleWidths) "Scale" else "Stretch", false) { ctl.selectionScaleWidths = !ctl.selectionScaleWidths }
             Spacer(Modifier.width(6.dp))
             Chip("Distort", ctl.distortMode) { ctl.distortMode = !ctl.distortMode }
+            Spacer(Modifier.width(6.dp))
+            Chip(if (ctl.lockRatio) "Keep ratio" else "Free ratio", ctl.lockRatio) { ctl.toggleLockRatio() }
             Spacer(Modifier.width(4.dp))
             if (singleText != null) GlyphButton(Glyph.TEXT, { ctl.textEditId = singleText.id }, contentDescription = "Edit text")
             GlyphButton(Glyph.DUPLICATE, { ctl.duplicateSelection() }, contentDescription = "Duplicate")
@@ -773,6 +844,12 @@ private fun HelpDialog(onDismiss: () -> Unit) {
         "Artboard" to "In Paper and artboard, pick a paper or screen size to get a fixed frame; it can be moved, rotated, and used as an export region. Grids can be limited to it.",
         "Gallery" to "Make folders (with notes), sort and group drawings, move them between folders, and back up everything or a single folder as a zip. Backups and .inkfield files import on any device. You can also keep a copy of every drawing in a device folder.",
         "Gestures and keys" to "Settings lets you choose what two-, three- and four-finger taps and the stylus button do, turn zoom/rotation and their snapping on or off, switch to a toolbar instead of the wheel, change the interface size, and edit keyboard shortcuts (hold Space to pan).",
+        "Brush packs" to "Tap the active wheel slot: the Brush library has packs for pencils, pastels, watercolor, airbrushes, spray paints, ink, crosshatching, halftones, Memphis patterns, exterior walls and tiling patterns. Halftone brushes use opacity to set dot and line size.",
+        "Fill bucket" to "Drag the color out of the center of the wheel and drop it on an area to fill it, or put the Fill bucket on a wheel slot and tap. Adjust the threshold right after filling; choose whether the fill looks at all layers or just this one.",
+        "Layer masks" to "Layer menu › Add layer mask. While editing a mask, painting black hides the layer and white reveals it again; the masking tools reveal too. Turn the mask off, fill it, or delete it from the same menu.",
+        "Blend modes" to "Layer menu › Blend mode: multiply, screen, overlay, soft light, color and more.",
+        "Resize freely" to "Drag a side handle of a selection to stretch it one way. Corners keep proportions only when 'Keep ratio' is on.",
+        "Hide the wheel" to "The wheel button in the top bar hides the tool wheel; a small pill with undo, redo and your color brings it back. Four-finger tap hides the whole interface.",
         "Saving" to "Drawings save automatically. Deleted drawings stay in Recently Deleted for 30 days.",
     )
     AlertDialog(

@@ -12,6 +12,14 @@ import kotlin.math.sqrt
 /** Pure geometry edits on strokes. */
 object EditOps {
 
+    /**
+     * Which strokes an edit may touch: normally only content, but while a layer's mask is being
+     * edited ([maskLayer]), only that mask's strokes.
+     */
+    fun eligible(s: Stroke, maskLayer: Long?): Boolean =
+        if (maskLayer == null) !s.onMask else s.onMask && s.layerId == maskLayer
+
+
     /** Applies [m] to every point. In Scale mode stroke widths follow the transform. */
     fun transform(s: Stroke, m: Matrix, scaleWidth: Boolean): Stroke {
         val pts = s.pts.copyOf()
@@ -35,7 +43,7 @@ object EditOps {
      * exactly where the line is visible), densified, and split where samples
      * fall inside the eraser. Returns null when nothing was hit.
      */
-    fun slice(d: Drawing, cache: StrokeCache, ax: Float, ay: Float, bx: Float, by: Float, r: Float): Drawing? {
+    fun slice(d: Drawing, cache: StrokeCache, ax: Float, ay: Float, bx: Float, by: Float, r: Float, maskLayer: Long? = null): Drawing? {
         val minX = minOf(ax, bx) - r; val maxX = maxOf(ax, bx) + r
         val minY = minOf(ay, by) - r; val maxY = maxOf(ay, by) + r
         var changed = false
@@ -43,7 +51,7 @@ object EditOps {
         val out = ArrayList<Stroke>(d.strokes.size + 4)
         for (s in d.strokes) {
             val layer = d.layer(s.layerId)
-            if (layer == null || !layer.visible || layer.locked || s.locked || s.brush.isItem) { out.add(s); continue }
+            if (layer == null || !layer.visible || layer.locked || s.locked || s.brush.isItem || !eligible(s, maskLayer)) { out.add(s); continue }
             val e = cache.get(s)
             val b = e.processed.bounds
             if (b.right < minX || b.left > maxX || b.bottom < minY || b.top > maxY) { out.add(s); continue }
@@ -100,7 +108,7 @@ object EditOps {
     }
 
     /** Ids of strokes the lasso polygon selects. */
-    fun lasso(d: Drawing, cache: StrokeCache, poly: FloatArray, partial: Boolean, activeLayerOnly: Boolean, includeLocked: Boolean = false): Set<Long> {
+    fun lasso(d: Drawing, cache: StrokeCache, poly: FloatArray, partial: Boolean, activeLayerOnly: Boolean, includeLocked: Boolean = false, maskLayer: Long? = null): Set<Long> {
         if (poly.size < 6) return emptySet()
         var minX = Float.MAX_VALUE; var minY = Float.MAX_VALUE; var maxX = -Float.MAX_VALUE; var maxY = -Float.MAX_VALUE
         for (i in poly.indices step 2) {
@@ -112,6 +120,7 @@ object EditOps {
             val layer = d.layer(s.layerId) ?: continue
             if (!layer.visible || layer.locked) continue
             if (s.locked && !includeLocked) continue
+            if (!eligible(s, maskLayer)) continue
             if (activeLayerOnly && s.layerId != d.activeLayerId) continue
             val pr = cache.get(s).processed
             val b = pr.bounds
@@ -129,12 +138,24 @@ object EditOps {
     }
 
     /** Topmost unlocked stroke within [r] of the point, or null. */
-    fun pick(d: Drawing, cache: StrokeCache, x: Float, y: Float, r: Float, includeLocked: Boolean = false): Stroke? {
+    fun pick(d: Drawing, cache: StrokeCache, x: Float, y: Float, r: Float, includeLocked: Boolean = false, maskLayer: Long? = null): Stroke? {
         for (s in d.strokes.asReversed()) {
             val layer = d.layer(s.layerId) ?: continue
             if (!layer.visible || layer.locked) continue
             if (s.locked && !includeLocked) continue
+            if (!eligible(s, maskLayer)) continue
             val pr = cache.get(s).processed
+            if (s.brush == com.omarkallas.inkfield.model.BrushType.FLOOD) {
+                // A fill is hit only where its mask is actually painted.
+                val mask = Assets.alphaMask(s.asset) ?: continue
+                val fm = Renderer.frameMatrix(s, mask.width.toFloat(), mask.height.toFloat()) ?: continue
+                val inv = android.graphics.Matrix()
+                if (!fm.invert(inv)) continue
+                val q = floatArrayOf(x, y); inv.mapPoints(q)
+                val ix = q[0].toInt(); val iy = q[1].toInt()
+                if (ix in 0 until mask.width && iy in 0 until mask.height && android.graphics.Color.alpha(mask.getPixel(ix, iy)) > 40) return s
+                continue
+            }
             if (s.brush.isItem) {
                 val poly = FloatArray(pr.n * 2) { if (it % 2 == 0) pr.x[it / 2] else pr.y[it / 2] }
                 if (pr.n >= 3 && Geometry.pointInPolygon(x, y, poly)) return s
@@ -161,12 +182,12 @@ object EditOps {
      * Strokes are first converted to their visible (smoothed, densified) geometry so they bend where they are seen;
      * [converted] remembers which strokes were already converted during this gesture.
      */
-    fun nudge(d: Drawing, cache: StrokeCache, cx: Float, cy: Float, dx: Float, dy: Float, r: Float, converted: MutableSet<Long>): Drawing? {
+    fun nudge(d: Drawing, cache: StrokeCache, cx: Float, cy: Float, dx: Float, dy: Float, r: Float, converted: MutableSet<Long>, maskLayer: Long? = null): Drawing? {
         var changed = false
         val out = ArrayList<Stroke>(d.strokes.size)
         for (s in d.strokes) {
             val layer = d.layer(s.layerId)
-            if (layer == null || !layer.visible || layer.locked || s.locked || s.brush.isItem || s.brush.isMask) { out.add(s); continue }
+            if (layer == null || !layer.visible || layer.locked || s.locked || s.brush.isItem || s.brush.isMask || !eligible(s, maskLayer)) { out.add(s); continue }
             val b = cache.get(s).processed.bounds
             if (cx < b.left - r || cx > b.right + r || cy < b.top - r || cy > b.bottom + r) { out.add(s); continue }
             var pts = s.pts

@@ -75,6 +75,8 @@ private fun Modifier.combinedClickableCompat(onClick: () -> Unit): Modifier = th
 @Composable
 private fun LayerRow(ctl: EditorController, layer: Layer, active: Boolean, onRename: (Layer) -> Unit) {
     var menu by remember { mutableStateOf(false) }
+    var blendMenu by remember { mutableStateOf(false) }
+    val context = androidx.compose.ui.platform.LocalContext.current
     Box {
         Row(
             Modifier
@@ -94,6 +96,8 @@ private fun LayerRow(ctl: EditorController, layer: Layer, active: Boolean, onRen
                 val extra = buildList {
                     if (layer.locked) add("locked")
                     if (layer.opacity < 0.999f) add("${(layer.opacity * 100).toInt()}%")
+                    if (layer.blend != com.omarkallas.inkfield.model.LayerBlend.NORMAL) add(layer.blend.label)
+                    if (layer.hasMask) add(if (ctl.maskEditing == layer.id) "editing mask" else if (layer.maskEnabled) "mask" else "mask off")
                 }
                 if (extra.isNotEmpty()) Text(extra.joinToString(" · "), color = Ink.muted, fontSize = 11.sp)
             }
@@ -113,15 +117,39 @@ private fun LayerRow(ctl: EditorController, layer: Layer, active: Boolean, onRen
                     colors = SliderDefaults.colors(thumbColor = Ink.text, activeTrackColor = Ink.text),
                 )
             }
+            DropdownMenuItem(text = { Text("Blend mode: ${layer.blend.label}") }, onClick = { menu = false; blendMenu = true })
+            if (!layer.hasMask) {
+                DropdownMenuItem(text = { Text("Add layer mask") }, onClick = { menu = false; ctl.addMask(layer.id) })
+            } else {
+                if (ctl.maskEditing == layer.id) DropdownMenuItem(text = { Text("Stop editing mask") }, onClick = { menu = false; ctl.editMask(null) })
+                else DropdownMenuItem(text = { Text("Edit mask") }, onClick = { menu = false; ctl.editMask(layer.id) })
+                DropdownMenuItem(text = { Text(if (layer.maskEnabled) "Turn mask off" else "Turn mask on") }, onClick = { menu = false; ctl.toggleMaskEnabled(layer.id) })
+                DropdownMenuItem(text = { Text("Mask: hide all") }, onClick = { menu = false; ctl.fillMask(layer.id, hide = true) })
+                DropdownMenuItem(text = { Text("Mask: reveal all") }, onClick = { menu = false; ctl.fillMask(layer.id, hide = false) })
+                DropdownMenuItem(text = { Text("Delete mask", color = Ink.danger) }, onClick = { menu = false; ctl.deleteMask(layer.id) })
+            }
             DropdownMenuItem(text = { Text("Select all") }, onClick = { menu = false; ctl.selectAllInLayer(layer.id) })
             DropdownMenuItem(text = { Text(if (layer.locked) "Unlock" else "Lock") }, onClick = { menu = false; ctl.toggleLayerLock(layer.id) })
             DropdownMenuItem(text = { Text("Rename") }, onClick = { menu = false; onRename(layer) })
             DropdownMenuItem(text = { Text("Duplicate") }, onClick = { menu = false; ctl.duplicateLayer(layer.id) })
             DropdownMenuItem(text = { Text("Move up") }, onClick = { menu = false; ctl.moveLayer(layer.id, up = true) })
             DropdownMenuItem(text = { Text("Move down") }, onClick = { menu = false; ctl.moveLayer(layer.id, up = false) })
-            DropdownMenuItem(text = { Text("Merge down") }, onClick = { menu = false; ctl.mergeDown(layer.id) })
+            DropdownMenuItem(text = { Text("Merge down") }, onClick = {
+                menu = false
+                if (!ctl.mergeDown(layer.id)) {
+                    android.widget.Toast.makeText(context, "Layers with a mask or blend mode can't be merged", android.widget.Toast.LENGTH_SHORT).show()
+                }
+            })
             DropdownMenuItem(text = { Text("Clear") }, onClick = { menu = false; ctl.clearLayer(layer.id) })
             DropdownMenuItem(text = { Text("Delete", color = Ink.danger) }, onClick = { menu = false; ctl.deleteLayer(layer.id) })
+        }
+        DropdownMenu(expanded = blendMenu, onDismissRequest = { blendMenu = false }) {
+            com.omarkallas.inkfield.model.LayerBlend.entries.forEach { mode ->
+                DropdownMenuItem(
+                    text = { Text((if (layer.blend == mode) "✓ " else "") + mode.label) },
+                    onClick = { blendMenu = false; ctl.setLayerBlend(layer.id, mode) },
+                )
+            }
         }
     }
 }

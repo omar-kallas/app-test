@@ -161,8 +161,59 @@ class EditorController(initial: Drawing, val prefs: Prefs) {
         }
         val id = d.nextId
         val layer = Layer(id = id, name = brush.family, family = brush.family)
-        return d.copy(layers = d.layers + layer, activeLayerId = id, nextId = id + 1) to id
+        // Fills sit under the linework so the lines stay crisp on top of them.
+        val layers = if (brush.family == "Fill") listOf(layer) + d.layers else d.layers + layer
+        return d.copy(layers = layers, activeLayerId = id, nextId = id + 1) to id
     }
+
+    // ---- layer masks ----
+    /** Layer whose mask new strokes go to, or null when drawing normally. */
+    var maskEditing by mutableStateOf<Long?>(null)
+        private set
+
+    /** Where a new stroke or item goes: the edited mask, or the usual target layer. */
+    private fun destination(d: Drawing, brush: BrushType): Triple<Drawing, Long, Boolean> {
+        val m = maskEditing
+        if (m != null && d.layer(m)?.hasMask == true) return Triple(d, m, true)
+        val (nd, id) = targetLayer(d, brush)
+        return Triple(nd, id, false)
+    }
+
+    fun addMask(id: Long) {
+        mapLayer(id) { it.copy(hasMask = true, maskEnabled = true) }
+        editMask(id)
+    }
+
+    /** Start (or with null, stop) painting on a layer's mask. */
+    fun editMask(id: Long?) {
+        maskEditing = id
+        clearSelection()
+        if (id != null && drawing.activeLayerId != id) commit(drawing.copy(activeLayerId = id, autoLayers = false), recordUndo = false)
+    }
+
+    fun toggleMaskEnabled(id: Long) = mapLayer(id) { it.copy(maskEnabled = !it.maskEnabled) }
+
+    fun deleteMask(id: Long) {
+        if (maskEditing == id) maskEditing = null
+        commit(drawing.copy(
+            layers = drawing.layers.map { if (it.id == id) it.copy(hasMask = false, maskEnabled = true) else it },
+            strokes = drawing.strokes.filter { !(it.layerId == id && it.onMask) },
+        ))
+        pruneSelection()
+    }
+
+    /** Fills the whole mask black (hide everything) or clears it (reveal everything). */
+    fun fillMask(id: Long, hide: Boolean) {
+        val strokes = drawing.strokes.filter { !(it.layerId == id && it.onMask) }
+        if (!hide) { commit(drawing.copy(strokes = strokes)); return }
+        // One huge black fill covering any reasonable drawing.
+        val r = 1_000_000f
+        val pts = floatArrayOf(-r, -r, 0.6f, 0f, r, -r, 0.6f, 0f, r, r, 0.6f, 0f, -r, r, 0.6f, 0f, -r, -r, 0.6f, 0f)
+        val s = Stroke(drawing.nextId, BrushType.FILL, 1f, 0xFF000000.toInt(), 1f, 0f, id, pts, onMask = true)
+        commit(drawing.copy(strokes = strokes + s, nextId = drawing.nextId + 1))
+    }
+
+    fun setLayerBlend(id: Long, b: com.omarkallas.inkfield.model.LayerBlend) = mapLayer(id) { it.copy(blend = b) }
 
     // ---- interface state driven by gestures and shortcuts ----
     /** Requests the editor screen handles (show a panel, hide the UI...). Consumed by the screen. */
@@ -258,15 +309,18 @@ class EditorController(initial: Drawing, val prefs: Prefs) {
         return true
     }
 
-    fun addStroke(brush: BrushType, pts: FloatArray, smoothing: Float? = null, measured: Boolean = false) {
+    fun addStroke(brush0: BrushType, pts: FloatArray, smoothing: Float? = null, measured: Boolean = false) {
         if (pts.size < Stroke.STRIDE) return
-        val (d, layerId) = targetLayer(drawing, brush)
+        val (d, layerId, onMask) = destination(drawing, brush0)
         val layer = d.layer(layerId)
         if (layer != null && layer.locked) return
+        // On a mask, the eraser tools paint white: erasing the mask reveals the layer again.
+        val brush = if (onMask && brush0.isMask) (if (brush0 == BrushType.MASK_SOFT) BrushType.AIRBRUSH else BrushType.FIXED) else brush0
+        val strokeColor = if (onMask && brush0.isMask) 0xFFFFFFFF.toInt() else color
         val s = Stroke(
-            id = d.nextId, brush = brush, size = slot.size, color = color,
+            id = d.nextId, brush = brush, size = slot.size, color = strokeColor,
             opacity = slot.opacity, smoothing = smoothing ?: slot.smoothing, layerId = layerId, pts = pts,
-            measured = measured, customBrush = if (brush == BrushType.STAMP) slot.custom else null,
+            measured = measured, customBrush = if (brush == BrushType.STAMP) slot.custom else null, onMask = onMask,
         )
         // Show a hidden target layer rather than drawing invisibly.
         val layers = d.layers.map { if (it.id == layerId && !it.visible) it.copy(visible = true) else it }
@@ -279,7 +333,7 @@ class EditorController(initial: Drawing, val prefs: Prefs) {
     fun sliceBegin() { sliceBase = drawing }
 
     fun sliceSegment(ax: Float, ay: Float, bx: Float, by: Float, r: Float) {
-        val next = EditOps.slice(drawing, cache, ax, ay, bx, by, r) ?: return
+        val next = EditOps.slice(drawing, cache, ax, ay, bx, by, r, maskEditing) ?: return
         drawing = next
         version++
     }
@@ -303,7 +357,7 @@ class EditorController(initial: Drawing, val prefs: Prefs) {
     var activeLayerOnly by mutableStateOf(false)
 
     fun selectLasso(poly: FloatArray) {
-        val ids = EditOps.lasso(drawing, cache, poly, partialLasso, activeLayerOnly, includeLocked)
+        val ids = EditOps.lasso(drawing, cache, poly, partialLasso, activeLayerOnly, includeLocked, maskEditing)
         selection = expandGroups(ids)
         prefs.partialLasso = partialLasso
     }
@@ -343,7 +397,7 @@ class EditorController(initial: Drawing, val prefs: Prefs) {
     private val nudged = HashSet<Long>()
     fun nudgeBegin() { sliceBase = drawing; nudged.clear() }
     fun nudgeStep(cx: Float, cy: Float, dx: Float, dy: Float, r: Float) {
-        val next = EditOps.nudge(drawing, cache, cx, cy, dx, dy, r, nudged) ?: return
+        val next = EditOps.nudge(drawing, cache, cx, cy, dx, dy, r, nudged, maskEditing) ?: return
         drawing = next
         version++
     }
@@ -400,16 +454,44 @@ class EditorController(initial: Drawing, val prefs: Prefs) {
     /** Distort mode: dragging a selection corner moves only that corner. */
     var distortMode by mutableStateOf(false)
 
-    private fun addItem(type: BrushType, pts: FloatArray, size: Float, text: String? = null, asset: String? = null): Long {
-        val (d, layerId) = targetLayer(drawing, type)
+    private fun addItem(type: BrushType, pts: FloatArray, size: Float, text: String? = null, asset: String? = null, select: Boolean = true): Long {
+        val (d, layerId, onMask) = destination(drawing, type)
         val s = Stroke(
-            id = d.nextId, brush = type, size = size, color = if (type == BrushType.TEXT) color else 0xFFFFFFFF.toInt(),
-            opacity = 1f, smoothing = 0f, layerId = layerId, pts = pts, text = text, asset = asset,
+            id = d.nextId, brush = type, size = size, color = if (type == BrushType.TEXT || type == BrushType.FLOOD) color else 0xFFFFFFFF.toInt(),
+            opacity = 1f, smoothing = 0f, layerId = layerId, pts = pts, text = text, asset = asset, onMask = onMask,
         )
         commit(d.copy(strokes = d.strokes + s, nextId = d.nextId + 1))
-        selection = setOf(s.id)
+        if (select) selection = setOf(s.id)
         return s.id
     }
+
+    // ---- color fills ----
+    /** Settings of the fill tool, shown in its bar after a fill. */
+    var fillThreshold by mutableFloatStateOf(prefs.fillThreshold)
+    var fillAllLayers by mutableStateOf(prefs.fillAllLayers)
+    /** Id of the fill whose threshold can still be adjusted, or null. */
+    var fillSession by mutableStateOf<Long?>(null)
+    /** A color dragged from the wheel and dropped at this screen point fills the area under it. */
+    var colorDropRequest by mutableStateOf<android.graphics.PointF?>(null)
+    /** Where a color being dragged from the wheel currently is (screen pixels), for the floating dot. */
+    var colorDragPos by mutableStateOf<androidx.compose.ui.geometry.Offset?>(null)
+
+    fun addFlood(asset: String, pts: FloatArray): Long = addItem(BrushType.FLOOD, pts, 1f, asset = asset, select = false)
+
+    /** Swaps a fill's region while its threshold is being adjusted (no extra undo step). */
+    fun replaceFlood(id: Long, asset: String, pts: FloatArray) {
+        drawing = drawing.copy(strokes = drawing.strokes.map { if (it.id == id) it.copy(asset = asset, pts = pts) else it })
+        version++
+    }
+
+    // ---- selection resizing ----
+    /** Corner handles keep the selection's proportions (side handles always stretch one way). */
+    var lockRatio by mutableStateOf(prefs.lockRatio)
+    fun toggleLockRatio() { lockRatio = !lockRatio; prefs.lockRatio = lockRatio }
+
+    // ---- the tool wheel itself ----
+    var wheelHidden by mutableStateOf(prefs.wheelHidden)
+    fun toggleWheel() { wheelHidden = !wheelHidden; prefs.wheelHidden = wheelHidden }
 
     /** Adds several strokes (an object from the library) as one selected group. */
     fun addGroup(strokes: List<Stroke>) {
@@ -673,6 +755,7 @@ class EditorController(initial: Drawing, val prefs: Prefs) {
     }
 
     fun deleteLayer(id: Long) {
+        if (maskEditing == id) maskEditing = null
         val d = drawing
         if (d.layers.size <= 1) {
             commit(d.copy(strokes = d.strokes.filter { it.layerId != id }))
@@ -696,16 +779,20 @@ class EditorController(initial: Drawing, val prefs: Prefs) {
         commit(d.copy(layers = layers, strokes = d.strokes + copies, nextId = next, activeLayerId = nl.id, autoLayers = false))
     }
 
-    fun mergeDown(id: Long) {
+    /** Merges a layer into the one below. Returns false when masks or blend modes would make it change the picture. */
+    fun mergeDown(id: Long): Boolean {
         val d = drawing
         val idx = d.layers.indexOfFirst { it.id == id }
-        if (idx <= 0) return
+        if (idx <= 0) return true
+        val up = d.layers[idx]; val down = d.layers[idx - 1]
+        if (up.hasMask || down.hasMask || up.blend != com.omarkallas.inkfield.model.LayerBlend.NORMAL) return false
         val below = d.layers[idx - 1]
         // Keep paint order: the upper layer's strokes draw after the lower layer's.
         val rest = d.strokes.filter { it.layerId != id && it.layerId != below.id }
         val lower = d.strokes.filter { it.layerId == below.id }
         val upper = d.strokes.filter { it.layerId == id }.map { it.copy(layerId = below.id) }
         commit(d.copy(layers = d.layers.filter { it.id != id }, strokes = rest + lower + upper, activeLayerId = below.id))
+        return true
     }
 
     /** Moves a layer one step up (toward the top) or down. */
@@ -719,10 +806,10 @@ class EditorController(initial: Drawing, val prefs: Prefs) {
     }
 
     fun selectAllInLayer(id: Long) {
-        selection = drawing.strokes.filter { it.layerId == id }.mapTo(HashSet()) { it.id }
+        selection = drawing.strokes.filter { it.layerId == id && it.onMask == (maskEditing == id) }.mapTo(HashSet()) { it.id }
         val i = slots.indexOfFirst { it.tool == ToolType.SELECT }
         if (i >= 0) { activeSlot = i; prefs.activeSlot = i }
     }
 
-    fun clearLayer(id: Long) = commit(drawing.copy(strokes = drawing.strokes.filter { it.layerId != id }))
+    fun clearLayer(id: Long) = commit(drawing.copy(strokes = drawing.strokes.filter { it.layerId != id || it.onMask }))
 }

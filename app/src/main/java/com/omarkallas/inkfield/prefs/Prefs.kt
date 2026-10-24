@@ -43,6 +43,7 @@ data class ToolSlot(
         fun tool(t: ToolType): ToolSlot = when (t) {
             ToolType.SLICE, ToolType.NUDGE -> ToolSlot(tool = t, size = if (t == ToolType.SLICE) 24f else 80f, sizePresets = listOf(8f, 24f, 60f, 120f))
             ToolType.TEXT -> ToolSlot(tool = t, size = 24f, sizePresets = listOf(12f, 24f, 48f, 96f))
+            ToolType.FILL -> ToolSlot(tool = t, size = 1f, sizePresets = listOf(1f, 1f, 1f, 1f))
             else -> ToolSlot(tool = t, size = 1f, sizePresets = listOf(1f, 1f, 1f, 1f))
         }
 
@@ -192,6 +193,23 @@ class Prefs(context: Context) {
     var eyedropperBrush: Boolean
         get() = sp.getBoolean("dropBrush", false)
         set(v) = sp.edit().putBoolean("dropBrush", v).apply()
+
+    var fillThreshold: Float
+        get() = sp.getFloat("fillThreshold", 0.3f)
+        set(v) = sp.edit().putFloat("fillThreshold", v).apply()
+
+    /** Fill looks at all visible layers (true) or only the active layer. */
+    var fillAllLayers: Boolean
+        get() = sp.getBoolean("fillAll", true)
+        set(v) = sp.edit().putBoolean("fillAll", v).apply()
+
+    var lockRatio: Boolean
+        get() = sp.getBoolean("lockRatio", false)
+        set(v) = sp.edit().putBoolean("lockRatio", v).apply()
+
+    var wheelHidden: Boolean
+        get() = sp.getBoolean("wheelHidden", false)
+        set(v) = sp.edit().putBoolean("wheelHidden", v).apply()
 
     var precisionOpen: Boolean
         get() = sp.getBoolean("precisionOpen", false)

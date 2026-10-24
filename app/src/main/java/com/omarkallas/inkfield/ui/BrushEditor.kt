@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -99,9 +100,35 @@ fun BrushEditorDialog(ctl: EditorController, initial: CustomBrush?, onDismiss: (
                     Text("Turn stamps along the stroke", fontSize = 14.sp, modifier = Modifier.weight(1f))
                     Switch(b.followPath, { b = b.copy(followPath = it) })
                 }
+                Text("Texture", color = Ink.muted, fontSize = 12.sp)
+                var texMenu by remember { mutableStateOf(false) }
+                androidx.compose.foundation.layout.Box {
+                    Chip(b.texture?.label ?: "None", b.texture != null) { texMenu = true }
+                    androidx.compose.material3.DropdownMenu(expanded = texMenu, onDismissRequest = { texMenu = false }) {
+                        androidx.compose.material3.DropdownMenuItem(text = { Text("None") }, onClick = { b = b.copy(pattern = null, grain = false); texMenu = false })
+                        com.omarkallas.inkfield.engine.PatternKind.entries.groupBy { it.group }.forEach { (group, kinds) ->
+                            Text(group, color = Ink.muted, fontSize = 11.sp, modifier = Modifier.padding(start = 12.dp, top = 6.dp))
+                            kinds.forEach { k ->
+                                androidx.compose.material3.DropdownMenuItem(text = { Text(k.label) }, onClick = {
+                                    b = b.copy(pattern = k, grain = false, threshold = if (k.gradient) true else b.threshold)
+                                    texMenu = false
+                                })
+                            }
+                        }
+                    }
+                }
+                if (b.texture != null) {
+                    BrushSlider("Texture scale", b.patternScale, 0.1f..3f) { b = b.copy(patternScale = it) }
+                }
+                if (b.texture?.gradient == true) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("Halftone (opacity sets dot/line size)", fontSize = 14.sp, modifier = Modifier.weight(1f))
+                        Switch(b.threshold, { b = b.copy(threshold = it) })
+                    }
+                }
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text("Paper grain", fontSize = 14.sp, modifier = Modifier.weight(1f))
-                    Switch(b.grain, { b = b.copy(grain = it) })
+                    Text("Glaze (darkens like watercolor)", fontSize = 14.sp, modifier = Modifier.weight(1f))
+                    Switch(b.glaze, { b = b.copy(glaze = it) })
                 }
             }
         },

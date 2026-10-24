@@ -28,7 +28,9 @@ enum class BrushType(val label: String, val family: String, val defaultSize: Flo
     /** Text label; [Stroke.text] holds the string and pts the frame. */
     TEXT("Text", "Text", 24f),
     /** Placed image; [Stroke.asset] names the file and pts the frame. */
-    IMAGE("Image", "Image", 1f);
+    IMAGE("Image", "Image", 1f),
+    /** Flood-filled region: [Stroke.asset] is an alpha mask tinted with the stroke color. */
+    FLOOD("Color fill", "Fill", 1f);
 
     /** Drawn as a constant-width centerline instead of a variable-width outline. */
     val isCenterline: Boolean get() = this == FIXED || this == WIRE || this == MARKER || this == AIRBRUSH
@@ -36,8 +38,8 @@ enum class BrushType(val label: String, val family: String, val defaultSize: Flo
     /** Non-destructive eraser: subtracts from what lies beneath it on its layer. */
     val isMask: Boolean get() = this == MASK_HARD || this == MASK_SOFT
 
-    /** Text and images: pts hold a frame (origin, x-axis end, y-axis end) instead of a path. */
-    val isItem: Boolean get() = this == TEXT || this == IMAGE
+    /** Text, images and fills: pts hold a frame (origin, x-axis end, y-axis end) instead of a path. */
+    val isItem: Boolean get() = this == TEXT || this == IMAGE || this == FLOOD
 
     /** Basic brushes offered in the brushes menu. */
     val isBasic: Boolean get() = !isMask && !isItem && this != STAMP
@@ -51,6 +53,7 @@ enum class ToolType(val label: String) {
     EYEDROPPER("Color picker"),
     NUDGE("Nudge"),
     TEXT("Text"),
+    FILL("Fill bucket"),
 }
 
 /**
@@ -79,6 +82,8 @@ class Stroke(
     val text: String? = null,
     val asset: String? = null,
     val customBrush: String? = null,
+    /** Part of its layer's mask: black hides the layer, white reveals it. */
+    val onMask: Boolean = false,
 ) {
     val count: Int get() = pts.size / STRIDE
 
@@ -97,7 +102,8 @@ class Stroke(
         text: String? = this.text,
         asset: String? = this.asset,
         customBrush: String? = this.customBrush,
-    ) = Stroke(id, brush, size, color, opacity, smoothing, layerId, pts, measured, groupId, locked, text, asset, customBrush)
+        onMask: Boolean = this.onMask,
+    ) = Stroke(id, brush, size, color, opacity, smoothing, layerId, pts, measured, groupId, locked, text, asset, customBrush, onMask)
 
     companion object {
         const val STRIDE = 4
@@ -113,7 +119,32 @@ data class Layer(
     val opacity: Float = 1f,
     /** Tool family this layer collects in Automatic sorting, or null for a user layer. */
     val family: String? = null,
+    val blend: LayerBlend = LayerBlend.NORMAL,
+    /** The layer has a mask (its strokes with onMask set). */
+    val hasMask: Boolean = false,
+    val maskEnabled: Boolean = true,
 )
+
+/** Layer blending modes, with their Photoshop keys for PSD export. */
+enum class LayerBlend(val label: String, val psdKey: String) {
+    NORMAL("Normal", "norm"),
+    MULTIPLY("Multiply", "mul "),
+    DARKEN("Darken", "dark"),
+    COLOR_BURN("Color burn", "idiv"),
+    SCREEN("Screen", "scrn"),
+    LIGHTEN("Lighten", "lite"),
+    COLOR_DODGE("Color dodge", "div "),
+    ADD("Add", "lddg"),
+    OVERLAY("Overlay", "over"),
+    SOFT_LIGHT("Soft light", "sLit"),
+    HARD_LIGHT("Hard light", "hLit"),
+    DIFFERENCE("Difference", "diff"),
+    EXCLUSION("Exclusion", "smud"),
+    HUE("Hue", "hue "),
+    SATURATION("Saturation", "sat "),
+    COLOR("Color", "colr"),
+    LUMINOSITY("Luminosity", "lum "),
+}
 
 @Serializable
 data class Viewport(

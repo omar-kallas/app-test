@@ -160,8 +160,9 @@ object Exporter {
             sb.append(">\n")
             for (s in list) {
                 val e = cache.get(s)
-                if (s.brush.isMask) continue // masks only exist in raster output
+                if (s.brush.isMask || s.onMask) continue // erasers and layer masks only exist in raster output
                 if (s.brush == BrushType.TEXT) { svgText(sb, s); continue }
+                if (s.brush == BrushType.FLOOD) { svgFlood(sb, s); continue }
                 if (s.brush == BrushType.IMAGE) { svgImage(sb, s); continue }
                 val pathData = svgPath(e.path)
                 if (pathData.isEmpty()) continue
@@ -205,6 +206,22 @@ object Exporter {
             sb.append("""<tspan x="0" y="${f(s.size * (1.25f * i + 1f))}">${escape(line)}</tspan>""")
         }
         sb.append("</text>\n")
+    }
+
+    /** A fill is written as an image of its region in the fill color. */
+    private fun svgFlood(sb: StringBuilder, s: com.omarkallas.inkfield.model.Stroke) {
+        val mask = Assets.alphaMask(s.asset) ?: return
+        val tinted = Bitmap.createBitmap(mask.width, mask.height, Bitmap.Config.ARGB_8888)
+        Canvas(tinted).drawBitmap(mask, 0f, 0f, android.graphics.Paint().apply { color = s.color or 0xFF000000.toInt() })
+        val out = ByteArrayOutputStream()
+        tinted.compress(Bitmap.CompressFormat.PNG, 100, out)
+        tinted.recycle()
+        val m = Renderer.frameMatrix(s, mask.width.toFloat(), mask.height.toFloat()) ?: return
+        val a = Color.alpha(s.color) / 255f * s.opacity
+        val b64 = android.util.Base64.encodeToString(out.toByteArray(), android.util.Base64.NO_WRAP)
+        sb.append("""<image width="${mask.width}" height="${mask.height}" transform="${svgMatrix(m)}"""")
+        if (a < 0.999f) sb.append(""" opacity="${f(a)}"""")
+        sb.append(""" href="data:image/png;base64,$b64"/>""").append('\n')
     }
 
     private fun svgImage(sb: StringBuilder, s: com.omarkallas.inkfield.model.Stroke) {
